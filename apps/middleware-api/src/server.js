@@ -1379,5 +1379,20 @@ if (process.env.ODOO_URL && process.env.ODOO_DB && process.env.ODOO_USERNAME && 
 app.listen(port, () => {
   console.log(`FinTax Middleware API listening at http://localhost:${port}`);
   console.log(`FinTax Swagger UI documentation at http://localhost:${port}/api-docs`);
+  const webUrl = process.env.WEB_ORIGIN?.split(',')[0] || 'http://localhost:5173';
+  const odooUrl = process.env.ODOO_URL || 'http://127.0.0.1:8070';
+  const dbHost = process.env.DB_HOST || '127.0.0.1';
+  const dbPort = process.env.DB_PORT || 5433;
+  const dbName = process.env.DB_NAME || 'finworkshop';
+  console.log('===========================================================');
+  console.log('  FinTax Automation - Danh sach dich vu & Cong ket noi');
+  console.log('===========================================================');
+  console.log(`  Web Client     : ${webUrl}/app`);
+  console.log(`  Middleware API : http://localhost:${port}/api/health`);
+  console.log(`  Swagger UI     : http://localhost:${port}/api-docs`);
+  console.log(`  Mock Tax API   : ${taxApiUrl}/health`);
+  console.log(`  Odoo 16 ERP    : ${odooUrl}`);
+  console.log(`  PostgreSQL DB  : ${dbHost}:${dbPort}/${dbName}`);
+  console.log('===========================================================');
 });
 if (process.env.ODOO_SYNC_WORKER !== 'false') setInterval(() => { void autoSyncOdooQueue(); }, 5000);
