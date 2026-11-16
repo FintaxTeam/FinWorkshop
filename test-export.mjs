@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url), ts = require('typescript'), XLSX
 const source = await fs.readFile('apps/web-client/src/exports.ts', 'utf8');
 const js = ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
 let blob;
-const context = {exports:{},require:(id)=>{ if(id==='./presentation'){const scope={exports:{},Intl,Date};vm.runInNewContext(ts.transpileModule(require('node:fs').readFileSync('apps/web-client/src/presentation.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,scope);return scope.exports;}return require(id);},Blob,TextDecoder,TextEncoder,Uint8Array,URL:{createObjectURL:(value)=>{blob=value;return 'blob:test'},revokeObjectURL:()=>{}},window:{setTimeout:(fn)=>fn()},document:{createElement:()=>({click:()=>{}})}};
+const context = {exports:{},require:(id)=>{ if(id==='./presentation'){const scope={exports:{},Intl,Date,require:(dep)=>dep==='./language'?{getStoredLanguage:()=>'vi'}:require(dep)};vm.runInNewContext(ts.transpileModule(require('node:fs').readFileSync('apps/web-client/src/presentation.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,scope);return scope.exports;}return require(id);},Blob,TextDecoder,TextEncoder,Uint8Array,URL:{createObjectURL:(value)=>{blob=value;return 'blob:test'},revokeObjectURL:()=>{}},window:{setTimeout:(fn)=>fn()},document:{createElement:()=>({click:()=>{}})}};
 vm.runInNewContext(js,context);
 context.exports.exportExcel('Hóa đơn Chi', [{code:'INPUT-1',total:108000},{code:'INPUT-2',total:216000}], [{key:'code',label:'Số hóa đơn'},{key:'total',label:'Tổng tiền',format:'money'}]);
 const bytes=Buffer.from(await blob.arrayBuffer());

@@ -1,5 +1,5 @@
 import { getPool, decodeData, getWorkshop } from './db.js';
-import { active, number } from './accounting.js';
+import { active, number, validateReportRange } from './accounting.js';
 
 const col = (key,label,format) => ({key,label,...(format?{format}:{})});
 const moneyCol = (key,label) => col(key,label,'money');
@@ -7,6 +7,8 @@ const incoming = type => ['OPENING','RECEIPT','RETURN','FINISHED_RECEIPT','ADJUS
 const value = row => number(row.amount ?? number(row.quantity)*number(row.unitCost));
 
 export function smeFromData(data, from='', to='9999-12-31') {
+  validateReportRange(from, to === '9999-12-31' ? '' : to);
+  if (from && to && from > to) validateReportRange(from, to);
   const all = entity => (data[entity] || []).filter(active);
   const within = row => (!from || row.date >= from) && row.date <= to;
   const invoices=all('invoices'), moves=all('stock-movements'), logs=all('labor-logs'), jobs=all('production-orders');
@@ -51,12 +53,28 @@ export function smeFromData(data, from='', to='9999-12-31') {
   const costs=jobs.map(job=>{
     const issued=moves.filter(row=>row.productionOrderId===job.id&&row.date<=to).reduce((sum,row)=>sum+(['ISSUE','WASTE'].includes(row.type)?value(row):row.type==='RETURN'?-value(row):0),0);
     const labor=logs.filter(row=>row.productionOrderId===job.id&&row.date<=to).reduce((sum,row)=>sum+Math.round(number(row.hours)*number(row.hourlyRate??row.laborRate)),0);
-    const receipts=moves.filter(row=>row.sourceProductionOrderId===job.id&&row.date<=to).reduce((sum,row)=>sum+value(row),0);
-    const machine=receipts?number(job.actualMachineCost):0;
-    if(machine)post({id:`machine-${job.id}`,date:job.acceptedAt?.slice(0,10)||job.completedAt?.slice(0,10),code:job.code},[['154','3388',machine]],'Chi phí máy phân bổ · cần đối chiếu nguồn');
-    const serviceFinished=!job.productId&&job.status==='COMPLETED'&&(job.completedAt?.slice(0,10)||'9999')<=to;
-    if(serviceFinished)post({id:`service-${job.id}`,date:job.completedAt.slice(0,10),code:job.code},[['632','154',issued+labor]],'Kết chuyển chi phí dịch vụ hoàn thành');
-    return {id:job.id,code:job.code,productName:job.productName,status:job.status,quantity:number(job.quantity),materialCost:issued,laborCost:labor,machineCost:machine,totalCost:issued+labor+machine,finishedValue:receipts,wip:Math.max(0,issued+labor+machine-receipts-(serviceFinished?issued+labor:0))};
+    const finishedMoves=moves.filter(row=>row.type==='FINISHED_RECEIPT'&&row.sourceProductionOrderId===job.id&&row.date<=to);
+    const receipts=finishedMoves.reduce((sum,row)=>sum+value(row),0);
+    const receiptMove=finishedMoves[0];
+    const machine=receiptMove?number(job.actualMachineCost):0;
+    const machineDate=job.acceptedDate||receiptMove?.date||job.acceptedAt?.slice(0,10)||job.completedDate||job.completedAt?.slice(0,10);
+    if(machine)post({id:`machine-${job.id}`,date:machineDate,code:job.code},[['154','3388',machine]],'Chi phí máy phân bổ · cần đối chiếu nguồn');
+    const legacyServiceFinished=!job.productId&&job.status==='COMPLETED'&&(job.completedDate||job.completedAt?.slice(0,10)||'9999')<=to;
+    const serviceEvents=Array.isArray(job.serviceCostEvents)?job.serviceCostEvents:(legacyServiceFinished?[{type:'COMPLETE',date:job.completedDate||job.completedAt.slice(0,10),amount:issued+labor}]:[]);
+    let netServiceCost=0;
+    for(const [idx,ev] of serviceEvents.entries()){
+      if(ev.date&&ev.date<=to){
+        const amt=number(ev.amount);
+        if(ev.type==='COMPLETE'){
+          netServiceCost+=amt;
+          post({id:`service-complete-${job.id}-${idx}`,date:ev.date,code:job.code},[['632','154',amt]],'Kết chuyển chi phí dịch vụ hoàn thành');
+        }else if(ev.type==='REOPEN'){
+          netServiceCost-=amt;
+          post({id:`service-reopen-${job.id}-${idx}`,date:ev.date,code:job.code},[['154','632',amt]],'Hoàn nhập kết chuyển do mở lại lệnh dịch vụ');
+        }
+      }
+    }
+    return {id:job.id,code:job.code,productName:job.productName,status:job.status,quantity:number(job.quantity),materialCost:issued,laborCost:labor,machineCost:machine,totalCost:issued+labor+machine,finishedValue:receipts,wip:Math.max(0,issued+labor+machine-receipts-netServiceCost)};
   });
   journal.sort((a,b)=>String(a.date).localeCompare(String(b.date))||String(a.code).localeCompare(String(b.code)));
   const inventory=[...all('materials').map(row=>({...row,itemEntity:'materials'})),...all('products').map(row=>({...row,itemEntity:'products'}))].filter(row=>row.trackInventory!==false).map(item=>{
@@ -101,6 +119,7 @@ export function smeFromData(data, from='', to='9999-12-31') {
 }
 
 export async function buildSmeReport(wid,from='',to=''){
+  validateReportRange(from, to);
   const [rows]=await getPool().query('SELECT entity,record_id,data FROM records WHERE workshop_id=?',[wid]);
   const data={};for(const row of rows)(data[row.entity]||=[]).push({...decodeData(row.data),id:row.record_id});
   const workshop=await getWorkshop(wid);

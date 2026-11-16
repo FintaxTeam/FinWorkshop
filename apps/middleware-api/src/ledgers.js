@@ -1,9 +1,10 @@
 import { getPool, decodeData } from './db.js';
-import { active, number } from './accounting.js';
+import { active, number, validateReportRange } from './accounting.js';
 
 const column = (key, label, format) => ({ key, label, ...(format ? { format } : {}) });
 const dateColumns = [column('date', 'Ngày', 'date'), column('code', 'Chứng từ'), column('description', 'Nội dung')];
 export async function buildBooks(wid, from = '', to = '') {
+  validateReportRange(from, to);
   const [records] = await getPool().query("SELECT entity, record_id, data FROM records WHERE workshop_id = ? AND entity IN ('invoices', 'transactions', 'materials', 'stock-movements', 'labor-logs', 'cash-accounts', 'accounting-adjustments', 'products') ORDER BY created_at, id", [wid]);
   const data = {};
   for (const row of records) { const value = { ...decodeData(row.data), id: row.record_id }; if (active(value)) (data[row.entity] ||= []).push(value); }
@@ -11,6 +12,7 @@ export async function buildBooks(wid, from = '', to = '') {
 }
 
 export function booksFromData(data, from = '', to = '') {
+  validateReportRange(from, to);
   const all = (entity) => (data[entity] || []).filter(active);
   const inPeriod = (row) => (!from || row.date >= from) && (!to || row.date <= to);
   const invoices = all('invoices').filter(inPeriod), transactions = all('transactions').filter(inPeriod);
@@ -25,7 +27,7 @@ export function booksFromData(data, from = '', to = '') {
     const incoming = ['OPENING','RETURN','RECEIPT','FINISHED_RECEIPT','ADJUST_IN'].includes(row.type) ? number(row.quantity) : 0;
     const outgoing = incoming ? 0 : number(row.quantity);
     const closing = opening + incoming - outgoing; runningStock.set(row.productId || row.materialId, closing);
-    return { ...row, description: row.materialName, opening, incoming, outgoing, closing, unitCost: row.unitCost ?? material.unitCost, amount: number(row.quantity) * number(row.unitCost ?? material.unitCost) };
+    return { ...row, description: row.materialName, opening, incoming, outgoing, closing, unitCost: row.unitCost ?? material.unitCost, amount: number(row.amount ?? Math.round(number(row.quantity) * number(row.unitCost ?? material.unitCost))) };
   }).filter(inPeriod);
   const labor = all('labor-logs').filter(inPeriod).map((row) => ({ ...row, description: row.employeeName, salary: Math.round(number(row.hours) * number(row.hourlyRate ?? row.laborRate)), salaryPaid: number(row.salaryPaid), contributions: number(row.contributions), salaryDue: Math.round(number(row.hours) * number(row.hourlyRate ?? row.laborRate)) - number(row.salaryPaid) }));
   const expenses = [

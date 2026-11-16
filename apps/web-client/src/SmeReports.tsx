@@ -8,13 +8,28 @@ const monthStart = () => `${today().slice(0, 7)}-01`;
 const quarterStart = () => { const now = today(); const m = Number(now.slice(5, 7)); const q = Math.floor((m - 1) / 3) * 3 + 1; return `${now.slice(0, 4)}-${String(q).padStart(2, '0')}-01`; };
 const yearStart = () => `${today().slice(0, 4)}-01-01`;
 
+const isValidDateInput = (value: string) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [y, m, d] = value.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+};
+
 export function SmeReports({ periodTools }: { periodTools: ReactNode }) {
   const [report, setReport] = useState<any>(null), [legacy, setLegacy] = useState<any[]>([]), [from, setFrom] = useState(monthStart()), [to, setTo] = useState(today()), [range, setRange] = useState('month');
   const [selected, setSelected] = useState(new URLSearchParams(window.location.search).get('book') || ''), [mode, setMode] = useState('SME'), [error, setError] = useState(''), [busy, setBusy] = useState(false);
   const load = useCallback(async () => {
+    if (!isValidDateInput(from) || !isValidDateInput(to)) {
+      setReport(null); setLegacy([]); setSelected(''); setError('Ngày báo cáo không hợp lệ.');
+      return;
+    }
+    if (from > to) {
+      setReport(null); setLegacy([]); setSelected(''); setError('Ngày bắt đầu không được lớn hơn ngày kết thúc.');
+      return;
+    }
     setBusy(true); setError('');
     try { const [sme, books] = await Promise.all([api.get('/reports/sme', { params: { from, to } }), api.get('/reports/books', { params: { from, to } })]); setReport(sme.data); setLegacy(books.data?.books || []); }
-    catch (reason) { setError(messageOf(reason)); } finally { setBusy(false); }
+    catch (reason) { setReport(null); setLegacy([]); setSelected(''); setError(messageOf(reason)); } finally { setBusy(false); }
   }, [from, to]);
   useEffect(() => { void load(); }, [load]);
   const choose = (kind: string) => { setRange(kind); setTo(today()); if (kind === 'month') setFrom(monthStart()); if (kind === 'quarter') setFrom(quarterStart()); if (kind === 'year') setFrom(yearStart()); };

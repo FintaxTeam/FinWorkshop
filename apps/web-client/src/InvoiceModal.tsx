@@ -1,6 +1,7 @@
-import { useEffect,useState,type FormEvent,type ReactNode } from 'react';
+import { useEffect,useRef,useState,type FormEvent,type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { api,formatDate,formatVnd,today,getRecords,messageOf } from './api';
-import { Button,IconButton } from './components';
+import { Button,IconButton,useDialogFocusTrap } from './components';
 import { X } from 'lucide-react';
 
 type Row = Record<string, any>;
@@ -17,7 +18,9 @@ export function InvoiceModal({ initial = {}, direction, onClose, onSubmit }: { i
   const [items, setItems] = useState<Row[]>(initial.items?.length ? initial.items.map((item: Row) => ({ ...item, taxRate: item.taxRate ?? initial.taxRate ?? 0 })) : [{ name: initial.description || '', quantity: 1, unitPrice: initial.subtotal || 0, taxRate: initial.taxRate ?? (Number(initial.subtotal) ? Number(initial.taxAmount || 0) * 100 / Number(initial.subtotal) : 0), taxRuleId: initial.taxRuleId || '' }]);
   const [catalog, setCatalog] = useState<Row[]>([]), [rules, setRules] = useState<Row[]>([]), [partners, setPartners] = useState<Row[]>([]), [error, setError] = useState(''), [busy, setBusy] = useState(false), [rounding, setRounding] = useState(Boolean(initial.taxRoundingAdjustment || initial.roundingAdjustment));
   const buying = direction === 'INPUT';
-  useEffect(() => { void Promise.all([getRecords<Row>('products'), getRecords<Row>('materials'), getRecords<Row>('tax-rules'), getRecords<Row>(buying ? 'suppliers' : 'customers')]).then(([products, materials, taxes, counterparties]) => { setCatalog([...products.map((row) => ({ ...row, itemEntity: 'products' })), ...materials.map((row) => ({ ...row, itemEntity: 'materials' }))].filter((row: Row) => row.status !== 'CANCELLED')); setRules(taxes.filter((row) => !['INACTIVE', 'CANCELLED'].includes(row.status))); setPartners(counterparties.filter((row: Row) => row.status !== 'CANCELLED')); }).catch((reason) => setError(messageOf(reason))); }, [buying]);
+  const dialogRef = useRef<HTMLFormElement>(null);
+  useDialogFocusTrap(dialogRef, onClose, busy);
+  useEffect(() => { void Promise.all([getRecords<Row>('products'), getRecords<Row>('materials'), getRecords<Row>('tax-rules'), getRecords<Row>(buying ? 'suppliers' : 'customers')]).then(([products, materials, taxes, counterparties]) => { setCatalog([...products.map((row) => ({ ...row, itemEntity: 'products' })), ...materials.map((row) => ({ ...row, itemEntity: 'materials' }))].filter((row: Row) => !['INACTIVE', 'CANCELLED'].includes(row.status))); setRules(taxes.filter((row) => !['INACTIVE', 'CANCELLED'].includes(row.status))); setPartners(counterparties.filter((row: Row) => !['INACTIVE', 'CANCELLED'].includes(row.status))); }).catch((reason) => setError(messageOf(reason))); }, [buying]);
   const patch = (index: number, data: Row) => setItems((rows) => rows.map((row, current) => current === index ? { ...row, ...data } : row));
   const selectProduct = (index: number, id: string) => {
     const product = catalog.find((row) => row.id === id); if (!product) { patch(index, { productId: '', materialId: '', taxRuleId: '' }); return; }
@@ -38,9 +41,9 @@ export function InvoiceModal({ initial = {}, direction, onClose, onSubmit }: { i
   const submit = (event: FormEvent) => { event.preventDefault(); if (step < 2) { setStep(step + 1); setError(''); return; } void save(); };
   const steps = [buying ? 'Người bán' : 'Khách hàng', buying ? 'Hàng mua' : 'Hàng bán', 'Kiểm tra và lưu'];
 
-  return <div className="fixed inset-0 z-50 overflow-hidden bg-slate-900/35 backdrop-blur-[2px]" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+  const modal = <div className="fixed inset-0 z-[100] overflow-hidden bg-slate-900/45 backdrop-blur-[2px]" onMouseDown={(event) => { if (!busy && event.target === event.currentTarget) onClose(); }}>
     <div className="fixed inset-y-0 right-0 flex max-w-full pl-6">
-      <form role="dialog" aria-modal="true" aria-label={`${initial.id ? 'Sửa' : 'Tạo'} hóa đơn ${buying ? 'mua' : 'bán'}`} onSubmit={submit} className="w-screen max-w-2xl bg-white shadow-2xl border-l border-slate-200 flex flex-col">
+      <form ref={dialogRef} role="dialog" aria-modal="true" aria-label={`${initial.id ? 'Sửa' : 'Tạo'} hóa đơn ${buying ? 'mua' : 'bán'}`} tabIndex={-1} onSubmit={submit} className="w-screen max-w-2xl bg-white shadow-2xl border-l border-slate-200 flex flex-col">
         {/* Drawer Header */}
         <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50/90 px-5 py-3.5">
           <div>
@@ -60,7 +63,7 @@ export function InvoiceModal({ initial = {}, direction, onClose, onSubmit }: { i
         <div className="flex-1 overflow-y-auto p-5 space-y-4">
           {step === 0 && <div className="space-y-4">
             <Field label={buying ? 'Tên người bán / Nhà cung cấp' : 'Tên khách hàng'} hint={buying ? 'Gõ tên hoặc chọn nhà cung cấp trong danh bạ' : 'Gõ tên hoặc chọn khách hàng trong danh bạ'}>
-              <input aria-label="Đối tác" list="invoice-partners" required value={header.counterparty} onChange={(event) => { const partner = partners.find((row) => row.name === event.target.value); setHeader({ ...header, counterparty: event.target.value, counterpartyId: partner?.id || '', taxCode: partner?.taxCode || header.taxCode || '' }); }} className={input} />
+              <input aria-label="Đối tác" list="invoice-partners" required value={header.counterparty} onChange={(event) => { const partner = partners.find((row) => row.name === event.target.value); setHeader({ ...header, counterparty: event.target.value, counterpartyId: partner?.id || '', taxCode: partner ? (partner.taxCode || '') : (header.counterpartyId ? '' : header.taxCode || '') }); }} className={input} />
               <datalist id="invoice-partners">{partners.map((row) => <option key={row.id} value={row.name} />)}</datalist>
             </Field>
             <Field label="Số hóa đơn (in trên chứng từ)"><input aria-label="Số hóa đơn" required value={header.code || ''} onChange={(event) => setHeader({ ...header, code: event.target.value })} className={input} /></Field>
@@ -186,4 +189,5 @@ export function InvoiceModal({ initial = {}, direction, onClose, onSubmit }: { i
       </form>
     </div>
   </div>;
+  return typeof document !== 'undefined' ? createPortal(modal, document.body) : modal;
 }

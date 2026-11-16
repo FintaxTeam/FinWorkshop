@@ -57,3 +57,33 @@ export function allocationAmounts(data) {
 }
 
 export const businessDate = () => new Date().toLocaleDateString('en-CA', { timeZone: process.env.WORKSHOP_TIME_ZONE || 'Asia/Ho_Chi_Minh' });
+
+export function isValidCalendarDate(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split('-').map(Number);
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  return dt.getUTCFullYear() === year && dt.getUTCMonth() === month - 1 && dt.getUTCDate() === day;
+}
+
+export function assertCalendarDate(value, label = 'Ngày chứng từ', required = true) {
+  const str = String(value ?? '').trim();
+  if (!str) {
+    if (required) throw businessError(`${label} không hợp lệ (định dạng YYYY-MM-DD).`);
+    return '';
+  }
+  if (!isValidCalendarDate(str)) throw businessError(`${label} không tồn tại trong lịch (${str}).`);
+  return str;
+}
+
+export function validateReportRange(from = '', to = '') {
+  const f = String(from || '').trim();
+  const t = String(to || '').trim();
+  if (f) assertCalendarDate(f, 'Từ ngày báo cáo', true);
+  if (t) assertCalendarDate(t, 'Đến ngày báo cáo', true);
+  if (f && t && f > t) throw businessError('Khoảng ngày báo cáo không hợp lệ (Từ ngày phải nhỏ hơn hoặc bằng Đến ngày).', 400);
+  return { from: f, to: t };
+}
+
+export function validPassword(password) {
+  return typeof password === 'string' && password.length >= 10 && Buffer.byteLength(password, 'utf8') <= 72;
+}

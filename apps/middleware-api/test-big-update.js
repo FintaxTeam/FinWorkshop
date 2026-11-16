@@ -39,11 +39,13 @@ try {
     assert.equal(row.total-(row.settledAmount ?? row.paidAmount ?? 0),row.openBalance);
   }
   const books = (await call(`/reports/books?from=${from}&to=${today}`)).books;
+  const sme = await call(`/reports/sme?from=${from}&to=${today}`);
   const dashboard = await call(`/dashboard?from=${from}&to=${today}&chartFrom=${shiftDay(today,-29)}&chartTo=${today}`);
-  const sum = (rows,key) => rows.reduce((sum,row) => sum+Number(row[key]||0),0);
+  const sum = (rows,key) => rows.reduce((sum,row) => totalOrZero(sum, row[key]),0);
+  function totalOrZero(acc, val) { return acc + Number(val || 0); }
   assert.equal(dashboard.trend.length,30);
   assert.equal(dashboard.metrics.netRevenue,sum(books.find((row)=>row.code==='S1-HKD').rows,'revenue'));
-  assert.equal(dashboard.metrics.operatingCost,sum(books.find((row)=>row.code==='S3-HKD').rows,'expense'));
+  assert.equal(dashboard.metrics.operatingCost, sme.summary.cogs + sme.summary.operatingExpense + sme.summary.financeExpense - sme.summary.financeIncome);
   assert.equal(dashboard.metrics.taxLiability,Math.max(0,books.find((row)=>row.code==='S4-HKD').rows.at(-1).taxDue));
   assert.equal(dashboard.metrics.receivable,sum(data.customers,'receivable'));
   assert.equal(dashboard.metrics.payable,sum(data.suppliers,'payable'));
@@ -69,7 +71,7 @@ try {
   assert.equal(tax.vatOutput,11000);assert.equal(tax.pit,1500);assert.equal(tax.taxDue,12500);
   console.log('PASS HKD rates are not double counted; mixed VAT/HKD ledger preserves both tax components');
 
-  const module = {exports:{},Intl,Date};
+  const module = {exports:{},Intl,Date,require:(id)=>id==='./language'?{getStoredLanguage:()=>'vi'}:{}};
   const file = new URL('../web-client/src/presentation.ts',import.meta.url);
   vm.runInNewContext(ts.transpileModule(await fs.readFile(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,module);
   const ui = module.exports;

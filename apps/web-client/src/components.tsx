@@ -1,4 +1,5 @@
-import { createContext,useContext,useState,type FormEvent,type ReactNode } from 'react';
+import { createContext,useContext,useEffect,useRef,useState,type FormEvent,type ReactNode,type RefObject } from 'react';
+import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
 import { Check,ChevronRight,CircleAlert,Info,LoaderCircle,Plus,Search,X,type LucideIcon } from 'lucide-react';
 import { isMoneyField } from './presentation';
@@ -84,6 +85,105 @@ export function StatusBadge({ status, label }: { status?: unknown; label?: strin
 
 export type FieldDef = { name: string; label: string; type?: 'text' | 'password' | 'number' | 'date' | 'select' | 'textarea' | 'file'; required?: boolean; placeholder?: string; options?: { value: string; label: string }[]; wide?: boolean; min?: number; max?: number; readOnly?: boolean };
 
+const FOCUSABLE_SELECTOR = 'a[href], area[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"]), [contenteditable="true"]';
+const openDialogStack: HTMLElement[] = [];
+let previousBodyOverflow = '';
+
+function getFocusableElements(container: HTMLElement): HTMLElement[] {
+  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+    (el) => !el.hasAttribute('disabled') && el.getAttribute('aria-hidden') !== 'true' && (el.offsetParent !== null || el.getClientRects().length > 0)
+  );
+}
+
+/** Keeps Escape, Tab focus cycling, background inertness, and opener focus restoration consistent across all drawers/modals. */
+export function useDialogFocusTrap(ref: RefObject<HTMLElement | null>, onClose: () => void, disabled = false) {
+  const onCloseRef = useRef(onClose);
+  const disabledRef = useRef(disabled);
+  onCloseRef.current = onClose;
+  disabledRef.current = disabled;
+
+  useEffect(() => {
+    const container = ref.current;
+    if (!container) return;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const root = document.getElementById('root');
+    const underlying = openDialogStack[openDialogStack.length - 1];
+    if (openDialogStack.length === 0) {
+      previousBodyOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+      if (root) {
+        (root as HTMLElement & { inert: boolean }).inert = true;
+        root.setAttribute('aria-hidden', 'true');
+      }
+    } else if (underlying && underlying !== container) {
+      (underlying as HTMLElement & { inert: boolean }).inert = true;
+    }
+    openDialogStack.push(container);
+
+    const rafId = window.requestAnimationFrame(() => {
+      if (!container.isConnected || container.contains(document.activeElement)) return;
+      const focusables = getFocusableElements(container);
+      const preferred = focusables.find((el) => el.matches('input, select, textarea')) || focusables[0] || container;
+      preferred.focus();
+    });
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (openDialogStack[openDialogStack.length - 1] !== container) return;
+      if (event.key === 'Escape') {
+        if (!disabledRef.current) {
+          event.preventDefault();
+          event.stopPropagation();
+          onCloseRef.current();
+        }
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const focusables = getFocusableElements(container);
+      if (focusables.length === 0) {
+        event.preventDefault();
+        container.focus();
+        return;
+      }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      if (!active || !container.contains(active)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+        return;
+      }
+      if (event.shiftKey && active === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.removeEventListener('keydown', onKeyDown, true);
+      const index = openDialogStack.lastIndexOf(container);
+      if (index !== -1) openDialogStack.splice(index, 1);
+      if (underlying && underlying !== container) {
+        (underlying as HTMLElement & { inert: boolean }).inert = false;
+      }
+      if (openDialogStack.length === 0) {
+        document.body.style.overflow = previousBodyOverflow;
+        if (root) {
+          (root as HTMLElement & { inert: boolean }).inert = false;
+          root.removeAttribute('aria-hidden');
+        }
+      }
+      if (previousFocus && previousFocus.isConnected && typeof previousFocus.focus === 'function') {
+        previousFocus.focus();
+      }
+    };
+  }, [ref]);
+}
+
 /**
  * Slide-over Drawer: Thay thế popup giữa màn hình bằng Drawer trượt từ bên phải
  * Giúp người dùng kế toán vẫn xem được bảng danh sách bên dưới, thao tác liền mạch, chuyên nghiệp
@@ -96,6 +196,8 @@ export function RecordModal({ title, fields, initial = {}, submitLabel, onClose,
   const [fileIds, setFileIds] = useState<Record<string, string>>({});
   const [uploading, setUploading] = useState<string | null>(null);
   const [error, setError] = useState('');
+  const dialogRef = useRef<HTMLFormElement>(null);
+  useDialogFocusTrap(dialogRef, onClose, busy || Boolean(uploading));
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setError('');
     const missing = fields.find((field) => field.required && !String(values[field.name] || '').trim());
@@ -112,9 +214,9 @@ export function RecordModal({ title, fields, initial = {}, submitLabel, onClose,
     finally { setUploading(null); }
   };
 
-  return <div className="fixed inset-0 z-50 overflow-hidden bg-slate-900/35 backdrop-blur-[2px]" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+  const modal = <div className="fixed inset-0 z-[100] overflow-hidden bg-slate-900/45 backdrop-blur-[2px]" onMouseDown={(event) => { if (!busy && !uploading && event.target === event.currentTarget) onClose(); }}>
     <div className="fixed inset-y-0 right-0 flex max-w-full pl-6">
-      <div className="w-screen max-w-xl bg-white shadow-2xl border-l border-slate-200 flex flex-col">
+      <form ref={dialogRef} role="dialog" aria-modal="true" aria-label={t(title)} tabIndex={-1} onSubmit={submit} className="w-screen max-w-xl bg-white shadow-2xl border-l border-slate-200 flex flex-col">
         {/* Drawer Header */}
         <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50/90 px-5 py-3.5">
           <div>
@@ -124,8 +226,8 @@ export function RecordModal({ title, fields, initial = {}, submitLabel, onClose,
           <IconButton label={t('Đóng')} onClick={onClose}><X size={16} /></IconButton>
         </div>
 
-        {/* Drawer Body & Footer inside Form */}
-        <form onSubmit={submit} className="flex-1 overflow-hidden flex flex-col">
+        {/* Drawer Body & Footer */}
+        <div className="flex-1 overflow-hidden flex flex-col">
           <div className="flex-1 overflow-y-auto p-5 space-y-4">
             {Boolean(initial.sourceRejectionNote || initial.rejectionNote) && (
               <p className="rounded-lg bg-rose-50 p-2.5 text-xs text-rose-700 border border-rose-200">
@@ -165,15 +267,16 @@ export function RecordModal({ title, fields, initial = {}, submitLabel, onClose,
             <span className="text-[11px] text-slate-400">{t('ESC hoặc dấu X để đóng')}</span>
             <div className="flex gap-2">
               <Button variant="secondary" compact onClick={onClose}>{t('Hủy')}</Button>
-              <Button type="submit" compact disabled={busy}>
+              <Button type="submit" compact disabled={busy || Boolean(uploading)}>
                 {busy && <LoaderCircle size={13} className="animate-spin" />}{effectiveSubmitLabel}
               </Button>
             </div>
           </div>
-        </form>
-      </div>
+        </div>
+      </form>
     </div>
   </div>;
+  return typeof document !== 'undefined' ? createPortal(modal, document.body) : modal;
 }
 
 type ToastItem = { id: number; message: string; kind: 'success' | 'error' | 'info' };

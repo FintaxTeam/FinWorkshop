@@ -5,7 +5,9 @@ const appPaths = new Set([
 ]);
 
 export function safeAppDestination(candidate: unknown): string {
-  if (typeof candidate !== 'string' || !candidate.startsWith('/') || candidate.startsWith('//') || /[\\\s]/.test(candidate)) return '/app';
+  if (typeof candidate !== 'string' || !candidate.startsWith('/') || candidate.startsWith('//') || /^\/\\/.test(candidate) || /[\r\n\\]/.test(candidate)) return '/app';
+  const pathOnly = candidate.split(/[?#]/)[0];
+  if (/\s/.test(pathOnly)) return '/app';
   try {
     const destination = new URL(candidate, window.location.origin);
     if (destination.origin !== window.location.origin || !appPaths.has(destination.pathname)) return '/app';

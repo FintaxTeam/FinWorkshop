@@ -1,0 +1,69 @@
+{
+  "testedAt": "2026-11-16T09:49:14.735Z",
+  "baseUi": "http://127.0.0.1:5184",
+  "baseApi": "http://127.0.0.1:3005/api",
+  "total": 12,
+  "passed": 12,
+  "results": [
+    {
+      "id": "FW-40",
+      "title": "Deep link /invoices?type=INPUT preserves full query across /login redirect",
+      "status": "PASS"
+    },
+    {
+      "id": "FW-41",
+      "title": "InvoicesPage derives tab from URL ?type= and supports Back navigation",
+      "status": "PASS"
+    },
+    {
+      "id": "FW-44",
+      "title": "CatalogPage ?tab=boms deep-link works and syncs with tabs",
+      "status": "PASS"
+    },
+    {
+      "id": "FW-45",
+      "title": "SettingsPage ?tab=integrations deep-link works and syncs with browser history",
+      "status": "PASS"
+    },
+    {
+      "id": "FW-18",
+      "title": "DataTable updates search filter when URL ?q= changes on same route and clears on clean navigation",
+      "status": "PASS"
+    },
+    {
+      "id": "FW-39",
+      "title": "InvoiceModal clears previous partner taxCode when switching to partner without taxCode",
+      "status": "PASS"
+    },
+    {
+      "id": "FW-17",
+      "title": "QuotationModal strips stale bom snapshot & resets BOM costs when cleared to Không dùng công thức",
+      "status": "PASS"
+    },
+    {
+      "id": "FW-16 & FW-42",
+      "title": "OWNER sees Gửi duyệt on DRAFT quotation & double-click Duyệt fires only 1 API request",
+      "status": "PASS"
+    },
+    {
+      "id": "FW-19 & FW-43",
+      "title": "Modals trap Tab focus inside dialog, set #root inert, close on Escape, and restore focus to opener",
+      "status": "PASS"
+    },
+    {
+      "id": "FW-06",
+      "title": "WorkshopPage Pick Material honors selected destination job B instead of clicked row job A",
+      "status": "PASS"
+    },
+    {
+      "id": "FW-38 UI",
+      "title": "SmeReports shows error, clears stale report data, and disables Excel export on from > to",
+      "status": "PASS"
+    },
+    {
+      "id": "NO_PAGE_ERRORS",
+      "title": "Zero uncaught page/runtime errors across UI verification",
+      "status": "PASS"
+    }
+  ]
+}
