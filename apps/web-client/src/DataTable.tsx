@@ -1,4 +1,5 @@
 import { useEffect,useMemo,useState,type ReactNode } from 'react';
+import { useLocation } from 'react-router-dom';
 import { Button,EmptyState,SearchBox,StatusBadge } from './components';
 import { exportExcel,type ExportColumn } from './exports';
 import { AlertTriangle,ArrowDownToLine,ArrowUpDown,Filter } from 'lucide-react';
@@ -39,7 +40,20 @@ export function Pagination({ page, pageSize, total, onPage, onPageSize }: { page
 
 export function DataTable({ title, rows, columns, controls, emptyTitle, emptyHint }: { emptyTitle?: string; emptyHint?: string; title: string; rows: Record<string, any>[]; columns: ExportColumn[]; controls?: (row: any) => ReactNode }) {
   const { t, isEn } = useLanguage();
-  const [search, setSearch] = useState(new URLSearchParams(window.location.search).get('q') || ''), [query, setQuery] = useState(''), [status, setStatus] = useState(new URLSearchParams(window.location.search).get('status') || ''), [type, setType] = useState(''), [page, setPage] = useState(1), [pageSize, setPageSize] = useState(10), [sort, setSort] = useState({ key: '', descending: false });
+  const location = useLocation();
+  const initialParams = new URLSearchParams(location.search);
+  const initialQ = initialParams.get('q') || '';
+  const initialStatus = initialParams.get('status') || '';
+  const [search, setSearch] = useState(initialQ), [query, setQuery] = useState(initialQ), [status, setStatus] = useState(initialStatus), [type, setType] = useState(''), [page, setPage] = useState(1), [pageSize, setPageSize] = useState(10), [sort, setSort] = useState({ key: '', descending: false });
+  useEffect(() => {
+    const nextParams = new URLSearchParams(location.search);
+    const nextQ = nextParams.get('q') || '';
+    const nextStatus = nextParams.get('status') || '';
+    setSearch(nextQ);
+    setQuery(nextQ);
+    setStatus(nextStatus);
+    setPage(1);
+  }, [location.pathname, location.search]);
   useEffect(() => { const timer = window.setTimeout(() => setQuery(search), 250); return () => window.clearTimeout(timer); }, [search]);
   const typeOf = (row: any) => String(row.direction || row.type || row.category || row.role || '');
   const statuses = [...new Set(rows.flatMap((row) => [row.status, row.paymentStatus, row.approvalStatus]).filter(Boolean).map(String))];

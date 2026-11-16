@@ -1,15 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { getPool, getWorkshop, getRecord, getRecordForUpdate, listRecords, saveRecord, createAudit, assertOpenPeriod, decodeData } from './db.js';
-import { active, allocationAmounts, businessError, calculateInvoice, invoiceDirection, number, businessDate } from './accounting.js';
+import { active, allocationAmounts, assertCalendarDate, businessError, calculateInvoice, invoiceDirection, number, businessDate } from './accounting.js';
 
-export async function normalizeInvoice(data, wid) {
+export async function normalizeInvoice(data, wid, executor = getPool()) {
   const direction = invoiceDirection(data);
-  const workshop = await getWorkshop(wid);
+  const workshop = await getWorkshop(wid, executor);
   const settings = workshop?.settings || {};
   const entities = ['tax-rules', 'products', 'materials'];
-  const [rows] = await getPool().query('SELECT entity, record_id, data FROM records WHERE workshop_id = ? AND entity IN (?)', [wid, entities]);
+  const [rows] = await executor.query('SELECT entity, record_id, data FROM records WHERE workshop_id = ? AND entity IN (?)', [wid, entities]);
   const records = rows.map((row) => ({ ...decodeData(row.data), id: row.record_id, entity: row.entity }));
-  const date = data.date || businessDate();
+  const date = assertCalendarDate(data.date || businessDate(), 'Ngày hóa đơn', true);
+  if (data.dueDate !== undefined && String(data.dueDate || '').trim() !== '') assertCalendarDate(String(data.dueDate), 'Hạn thanh toán', true);
   function resolve(value) {
     const item = records.find((row) => ['products', 'materials'].includes(row.entity) && row.id === (value.productId || value.materialId));
     if ((value.productId || value.materialId) && (!item || !active(item) || item.status==='INACTIVE')) throw businessError('Mặt hàng không tồn tại hoặc đã ngừng hoạt động.');
@@ -23,12 +24,12 @@ export async function normalizeInvoice(data, wid) {
     if (settings.taxMethod === 'HKD_REVENUE' && !rule && !value.items?.length) throw businessError('HKD cần chọn quy tắc đã xác nhận để tách GTGT và TNCN.');
     return { ...value, ...(item ? { name: value.name || item.name, unitPrice: value.unitPrice ?? item.unitCost ?? item.price, unit: item.unit, taxRate: value.taxRate ?? item[direction === 'INPUT' ? 'inputTaxRate' : 'outputTaxRate'] } : {}), ...(direction==='INPUT'?{purchaseCategory:value.purchaseCategory||(item?.trackInventory!==false&&item?'INVENTORY':data.purchaseCategory||'OPERATING')}:{}), ...(rule ? { taxRuleId: rule.id, taxRate: rule.taxRate !== undefined ? number(rule.taxRate) : number(rule.vatRate) + (rule.taxMode === 'HKD_REVENUE' ? number(rule.pitRate) : 0), taxMode: rule.taxMode, vatRate: rule.vatRate, pitRate: rule.pitRate, taxTreatment: rule.taxTreatment } : {}) };
   }
-  const value = resolve({ ...data, direction });
+  const value = resolve({ ...data, date, direction });
   if (data.items?.length) value.items = data.items.map((item) => resolve({ ...item, taxRuleId: item.taxRuleId !== undefined ? item.taxRuleId : value.taxRuleId, taxRate: item.taxRate ?? value.taxRate }));
   if (value.counterpartyId) {
-    const partner = await getRecord(direction === 'INPUT' ? 'suppliers' : 'customers', value.counterpartyId, wid);
+    const partner = await getRecord(direction === 'INPUT' ? 'suppliers' : 'customers', value.counterpartyId, wid, executor);
     if (!partner || !active(partner) || partner.status==='INACTIVE') throw businessError('Đối tác không thuộc doanh nghiệp hoặc đã ngừng hoạt động.');
-    value.counterparty = partner.name; value.taxCode = partner.taxCode || value.taxCode;
+    value.counterparty = partner.name; value.taxCode = partner.taxCode || value.taxCode || '';
   }
   if (direction === 'INPUT') {
     const inventory = value.items?.length && value.items.every(line => records.some(item => ['materials','products'].includes(item.entity) && item.id === (line.materialId || line.productId) && item.trackInventory !== false));
@@ -45,7 +46,8 @@ export async function updateInvoicePartner(executor, actorId, invoice, delta, wi
   const direction = invoiceDirection(invoice);
   const entity = direction === 'OUTPUT' ? 'customers' : 'suppliers';
   const field = direction === 'OUTPUT' ? 'receivable' : 'payable';
-  const match = (await listRecords(entity, wid, executor)).find((row) => active(row) && ((invoice.counterpartyId && row.id === invoice.counterpartyId) || (invoice.taxCode && row.taxCode === invoice.taxCode) || row.name === invoice.counterparty));
+  const partners = await listRecords(entity, wid, executor);
+  const match = partners.find((row) => active(row) && (invoice.counterpartyId ? row.id === invoice.counterpartyId : ((invoice.taxCode && row.taxCode === invoice.taxCode) || row.name === invoice.counterparty)));
   if (!match) { if (!invoice.counterparty || delta < 0) return null; return saveRecord(entity, { name: invoice.counterparty, taxCode: invoice.taxCode || '', [field]: delta, status: 'ACTIVE' }, actorId, wid, executor); }
   const partner = await getRecordForUpdate(entity, match.id, wid, executor);
   const invoices = (await listRecords('invoices', wid, executor)).filter(row => active(row) && invoiceDirection(row) === direction && (row.counterpartyId === partner.id || !row.counterpartyId && row.counterparty === partner.name));
@@ -77,11 +79,26 @@ export async function allocatePayment(data, actor) {
     if (!payment || !invoice) throw businessError('Không tìm thấy thanh toán hoặc hóa đơn.', 404);
     if (!active(payment) || !active(invoice)) throw businessError('Không phân bổ chứng từ đã hủy.', 409);
     await assertOpenPeriod(payment, wid, connection); await assertOpenPeriod(invoice, wid, connection);
-    if ((payment.direction === 'RECEIVED' ? 'OUTPUT' : 'INPUT') !== invoiceDirection(invoice)) throw businessError('Chiều thanh toán không khớp loại hóa đơn.', 409);
-    if ((payment.counterpartyId && invoice.counterpartyId && payment.counterpartyId !== invoice.counterpartyId) || String(payment.counterparty || '').trim().toLowerCase() !== String(invoice.counterparty || '').trim().toLowerCase()) throw businessError('Thanh toán và hóa đơn phải cùng đối tác.', 409);
+    const direction = invoiceDirection(invoice);
+    if ((payment.direction === 'RECEIVED' ? 'OUTPUT' : 'INPUT') !== direction) throw businessError('Chiều thanh toán không khớp loại hóa đơn.', 409);
+    const partnerEntity = direction === 'OUTPUT' ? 'customers' : 'suppliers';
+    let samePartner = false;
+    if (payment.counterpartyId && invoice.counterpartyId) {
+      samePartner = payment.counterpartyId === invoice.counterpartyId;
+    } else if (payment.counterpartyId || invoice.counterpartyId) {
+      const knownId = payment.counterpartyId || invoice.counterpartyId;
+      const partner = await getRecord(partnerEntity, knownId, wid, connection);
+      const otherName = String((payment.counterpartyId ? invoice.counterparty : payment.counterparty) || '').trim().toLowerCase();
+      const snapshotName = String((payment.counterpartyId ? payment.counterparty : invoice.counterparty) || '').trim().toLowerCase();
+      samePartner = Boolean(otherName && (otherName === String(partner?.name || '').trim().toLowerCase() || otherName === snapshotName));
+    } else {
+      samePartner = String(payment.counterparty || '').trim().toLowerCase() === String(invoice.counterparty || '').trim().toLowerCase();
+    }
+    if (!samePartner) throw businessError('Thanh toán và hóa đơn phải cùng đối tác.', 409);
     if (amounts.allocatedAmount > number(payment.amount) - number(payment.allocatedAmount)) throw businessError('Số tiền phân bổ vượt số dư phiếu.');
     if (amounts.settlementAmount > number(invoice.openBalance ?? invoice.total)) throw businessError('Giá trị tất toán vượt công nợ còn lại.');
-    const value = { id: randomUUID(), paymentId: payment.id, invoiceId: invoice.id, date: data.date || payment.date, status: 'ACTIVE', ...amounts };
+    const allocDate = assertCalendarDate(data.date || payment.date, 'Ngày phân bổ', true);
+    const value = { id: randomUUID(), paymentId: payment.id, invoiceId: invoice.id, date: allocDate, status: 'ACTIVE', ...amounts };
     const save = (entity, row) => saveRecord(entity, row, actor.id, wid, connection);
     if (amounts.bankFeeAmount) {
       const fee = await save('transactions', { date: value.date, description: `Phí ngân hàng ${payment.code}`, amount: amounts.bankFeeAmount, accountId: payment.accountId, accountName: payment.accountName, direction: 'EXPENSE', classification: 'BUSINESS_EXPENSE', status: 'CONFIRMED', source: 'ALLOCATION_FEE', allocationId: value.id });
@@ -167,8 +184,8 @@ export async function voidInvoice(id, actor, reason, autoUnallocate = false) {
   });
 }
 
-export async function reviseQuotation(id, actor, overrides = {}) {
-  return transaction(actor.workshopId, async (connection) => {
+export async function reviseQuotation(id, actor, overrides = {}, existingConnection = null) {
+  const run = async (connection) => {
     const wid = actor.workshopId, before = await getRecordForUpdate('quotations', id, wid, connection);
     if (!before || !['REJECTED', 'APPROVED', 'SENT', 'ACCEPTED'].includes(before.status)) throw businessError('Chỉ tạo phiên bản mới từ báo giá bị từ chối, đã duyệt, đã gửi hoặc đã chấp nhận.', 409);
     const rootId = before.parentQuoteId || before.id;
@@ -180,5 +197,6 @@ export async function reviseQuotation(id, actor, overrides = {}) {
     const saved = await saveRecord('quotations', { ...copy, id: randomUUID(), code: `${rootCode}-v${version}`, rootCode, version, status: 'DRAFT', parentQuoteId: rootId, previousVersionId: before.id, rejectionNote: before.rejectionNote || before.sourceRejectionNote || '', sourceRejectionNote: before.rejectionNote || before.sourceRejectionNote || '', createdAt: new Date().toISOString() }, actor.id, wid, connection);
     await audit(connection, actor, 'QUOTATION_REVISED', 'quotations', before, saved, before.rejectionNote);
     return saved;
-  });
+  };
+  return existingConnection ? run(existingConnection) : transaction(actor.workshopId, run);
 }

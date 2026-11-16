@@ -1,6 +1,6 @@
 import { useEffect,useMemo,useState,useRef } from 'react';
 import { Link,Navigate,Outlet,Route,Routes,useLocation,useNavigate } from 'react-router-dom';
-import { ArrowLeftRight,Bell,Boxes,BriefcaseBusiness,ChevronDown,ChevronUp,Eye,EyeOff,FileCheck2,FileClock,FileText,Factory,Globe,LayoutDashboard,LogOut,Menu,Package,Search,Settings2,ShieldCheck,Users,Wallet,X } from 'lucide-react';
+import { ArrowLeftRight,Bell,Boxes,BriefcaseBusiness,ChevronDown,ChevronUp,Eye,EyeOff,FileCheck2,FileClock,FileText,Factory,Globe,LayoutDashboard,LogOut,Menu,Package,Plus,Search,Settings2,ShieldCheck,Users,Wallet,X } from 'lucide-react';
 import { useAuth } from './auth';
 import { useLanguage } from './language';
 import { CatalogPage,CustomersPage,DashboardPage,InventoryPage,InvoicesPage,PaymentsPage,QuotationsPage,ReconciliationPage,ReportsPage,SettingsPage,SuppliersPage,TransactionsPage,WorkshopPage } from './pages';
@@ -30,61 +30,68 @@ const nav: NavGroup[] = [
     ]
   },
   {
-    id: 'finance',
-    section: 'Tiền & Thuế',
+    id: 'commercial',
+    section: 'Mua - Bán & Công nợ',
+    icon: FileCheck2,
+    items: [
+      { to: '/quotations', label: 'Báo giá khách hàng', icon: FileClock, allow: ['OWNER', 'ACCOUNTANT'] },
+      { to: '/invoices', label: 'Hóa đơn Mua / Bán', icon: FileCheck2, allow: ['OWNER', 'ACCOUNTANT'] },
+      { to: '/payments', label: 'Công nợ & Thanh toán', icon: ArrowLeftRight, allow: ['OWNER', 'ACCOUNTANT'] },
+    ]
+  },
+  {
+    id: 'treasury',
+    section: 'Quỹ & Ngân hàng',
     icon: Wallet,
     items: [
-      { to: '/transactions', label: 'Thu chi', icon: Wallet, allow: ['OWNER', 'ACCOUNTANT'] },
-      { to: '/payments', label: 'Ai nợ ai', icon: ArrowLeftRight, allow: ['OWNER', 'ACCOUNTANT'] },
-      { to: '/reconciliation', label: 'Khớp ngân hàng', icon: ShieldCheck, allow: ['OWNER', 'ACCOUNTANT'] },
-      { to: '/invoices', label: 'Hóa đơn', icon: FileCheck2, allow: ['OWNER', 'ACCOUNTANT'] },
-      { to: '/reports', label: 'Thuế & 7 Sổ sách', icon: FileText, allow: ['OWNER', 'ACCOUNTANT'] },
+      { to: '/transactions', label: 'Thu chi quỹ & Dòng tiền', icon: Wallet, allow: ['OWNER', 'ACCOUNTANT'] },
+      { to: '/reconciliation', label: 'Đối soát ngân hàng', icon: ShieldCheck, allow: ['OWNER', 'ACCOUNTANT'] },
     ]
   },
   {
     id: 'workshop',
-    section: 'Xưởng & Kho',
+    section: 'Sản xuất & Kho',
     icon: Factory,
     items: [
-      { to: '/quotations', label: 'Báo giá', icon: FileClock, allow: ['OWNER', 'ACCOUNTANT'] },
-      { to: '/catalog', label: 'Sản phẩm & vật tư', icon: Package, allow: ['OWNER', 'ACCOUNTANT'] },
-      { to: '/workshop', label: 'Việc làm trong xưởng', icon: Factory, allow: ['OWNER', 'ACCOUNTANT', 'WAREHOUSE', 'WORKSHOP'] },
-      { to: '/inventory', label: 'Quản lý kho', icon: Boxes, allow: ['OWNER', 'ACCOUNTANT', 'WAREHOUSE', 'WORKSHOP'] },
+      { to: '/workshop', label: 'Lệnh sản xuất', icon: Factory, allow: ['OWNER', 'ACCOUNTANT', 'WAREHOUSE', 'WORKSHOP'] },
+      { to: '/inventory', label: 'Nhập xuất tồn kho', icon: Boxes, allow: ['OWNER', 'ACCOUNTANT', 'WAREHOUSE', 'WORKSHOP'] },
     ]
   },
   {
-    id: 'partners',
-    section: 'Khách & NCC',
-    icon: Users,
+    id: 'reports',
+    section: 'Báo cáo & Thuế',
+    icon: FileText,
     items: [
+      { to: '/reports', label: '7 Sổ kế toán & Thuế', icon: FileText, allow: ['OWNER', 'ACCOUNTANT'] }
+    ]
+  },
+  {
+    id: 'master',
+    section: 'Danh mục',
+    icon: Package,
+    items: [
+      { to: '/catalog', label: 'Vật tư, Thành phẩm & BOM', icon: Package, allow: ['OWNER', 'ACCOUNTANT'] },
       { to: '/customers', label: 'Khách hàng', icon: Users, allow: ['OWNER', 'ACCOUNTANT'] },
-      { to: '/suppliers', label: 'Người bán / NCC', icon: BriefcaseBusiness, allow: ['OWNER', 'ACCOUNTANT'] },
-    ]
-  },
-  {
-    id: 'settings',
-    section: 'Cài đặt',
-    icon: Settings2,
-    items: [
-      { to: '/settings', label: 'Cài đặt hệ thống', icon: Settings2, allow: ['OWNER', 'ACCOUNTANT', 'WAREHOUSE', 'WORKSHOP'] }
+      { to: '/suppliers', label: 'Nhà cung cấp', icon: BriefcaseBusiness, allow: ['OWNER', 'ACCOUNTANT'] },
+      { to: '/settings', label: 'Cài đặt & Đồng bộ Odoo', icon: Settings2, allow: ['OWNER', 'ACCOUNTANT', 'WAREHOUSE', 'WORKSHOP'] },
     ]
   },
 ];
 
 const titles: Record<string, string> = {
   '/app': 'Bàn làm việc',
-  '/transactions': 'Thu chi',
-  '/payments': 'Ai nợ ai',
-  '/reconciliation': 'Khớp với ngân hàng',
-  '/invoices': 'Hóa đơn',
-  '/reports': 'Thuế và 7 sổ sách',
-  '/quotations': 'Báo giá',
-  '/catalog': 'Sản phẩm & vật tư',
-  '/workshop': 'Việc làm trong xưởng',
-  '/inventory': 'Quản lý kho',
+  '/transactions': 'Thu chi quỹ & Dòng tiền',
+  '/payments': 'Công nợ & Thanh toán',
+  '/reconciliation': 'Đối soát ngân hàng',
+  '/invoices': 'Hóa đơn Mua / Bán',
+  '/reports': '7 Sổ kế toán & Thuế',
+  '/quotations': 'Báo giá khách hàng',
+  '/catalog': 'Vật tư, Thành phẩm & BOM',
+  '/workshop': 'Lệnh sản xuất',
+  '/inventory': 'Nhập xuất tồn kho',
   '/customers': 'Khách hàng',
-  '/suppliers': 'Người bán / NCC',
-  '/settings': 'Cài đặt'
+  '/suppliers': 'Nhà cung cấp',
+  '/settings': 'Cài đặt & Đồng bộ Odoo'
 };
 
 const pageAccessEntities: Record<string, string> = {
@@ -111,7 +118,7 @@ function Gate() {
   const { isEn } = useLanguage();
   const location = useLocation();
   if (loading) return <div className="flex min-h-screen items-center justify-center text-xs text-slate-500">{isEn ? 'Authenticating session…' : 'Đang xác thực phiên…'}</div>;
-  if (!user) return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+  if (!user) return <Navigate to="/login" replace state={{ from: `${location.pathname}${location.search}${location.hash}` }} />;
   const entity = location.pathname === '/app' && ['WORKSHOP', 'WAREHOUSE'].includes(user.role) ? undefined : pageAccessEntities[location.pathname];
   if (entity && !userCanAccess(user, entity)) return <Navigate to="/settings" replace />;
   return <Outlet />;
@@ -131,6 +138,7 @@ function AppShell() {
 
   const [mobileNav, setMobileNav] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [quickOpen, setQuickOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchValue, setSearchValue] = useState('');
   const [openDropdown, setOpenDropdown] = useState<string | null>(null);
@@ -142,6 +150,12 @@ function AppShell() {
   useEffect(() => {
     document.title = `${currentTitle} · FinWorkshop`;
   }, [currentTitle]);
+
+  useEffect(() => {
+    setOpenDropdown(null);
+    setQuickOpen(false);
+    setProfileOpen(false);
+  }, [location.pathname, location.search]);
 
   // Click outside to close dropdown
   useEffect(() => {
@@ -214,7 +228,7 @@ function AppShell() {
           </div>
 
           {/* Center: Desktop Top Navigation Groups with Dropdowns */}
-          <nav ref={dropdownRef} className="hidden lg:flex items-center gap-1">
+          <nav ref={dropdownRef} onMouseLeave={() => setOpenDropdown(null)} className="hidden lg:flex items-center gap-1">
             {visibleNav.map((group) => {
               const isGroupActive = group.items.some((item) => item.to === location.pathname);
               const isOpen = openDropdown === group.id;
@@ -312,16 +326,47 @@ function AppShell() {
               <Bell size={16} />
             </Link>
 
-            <a
-              href="http://localhost:3001/api-docs"
-              target="_blank"
-              rel="noopener noreferrer"
-              title="Mở tài liệu API (Swagger UI)"
-              className="hidden sm:flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-colors shadow-2xs"
-            >
-              <FileText size={13} className="text-brand-600" />
-              <span>Swagger API</span>
-            </a>
+            {['OWNER', 'ACCOUNTANT'].includes(user?.role || '') && (
+              <div className="relative hidden sm:block">
+                <button
+                  type="button"
+                  onClick={() => setQuickOpen((v) => !v)}
+                  className="flex items-center gap-1 rounded-lg bg-brand-600 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-brand-700 transition-colors shadow-xs"
+                >
+                  <Plus size={14} />
+                  <span>{t('Tạo nhanh')}</span>
+                  <ChevronDown size={12} className={`opacity-80 transition-transform ${quickOpen ? 'rotate-180' : ''}`} />
+                </button>
+                {quickOpen && (
+                  <div
+                    onMouseLeave={() => setQuickOpen(false)}
+                    className="absolute right-0 top-10 z-50 w-52 rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl text-slate-800"
+                  >
+                    <div className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400 border-b border-slate-100 mb-1">
+                      {t('Tạo nhanh')}
+                    </div>
+                    {[
+                      { to: '/quotations?new=1', label: 'Lập báo giá mới', icon: FileClock },
+                      { to: '/invoices?new=1&type=OUTPUT', label: 'Hóa đơn bán hàng', icon: FileCheck2 },
+                      { to: '/invoices?new=1&type=INPUT', label: 'Hóa đơn mua vật tư', icon: BriefcaseBusiness },
+                      { to: '/transactions?new=1', label: 'Phiếu thu / chi quỹ', icon: Wallet },
+                      { to: '/payments?new=1', label: 'Thu / Trả công nợ', icon: ArrowLeftRight },
+                      { to: '/inventory?new=1', label: 'Phiếu nhập / xuất kho', icon: Boxes },
+                    ].map((q) => (
+                      <Link
+                        key={q.to}
+                        to={q.to}
+                        onClick={() => setQuickOpen(false)}
+                        className="flex items-center gap-2.5 rounded-lg px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 hover:text-brand-700 transition-colors"
+                      >
+                        <q.icon size={14} className="text-brand-600 shrink-0" />
+                        <span>{q.label}</span>
+                      </Link>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="h-4 w-px bg-slate-200 mx-0.5" />
 

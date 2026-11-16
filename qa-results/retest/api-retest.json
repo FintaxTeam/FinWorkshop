@@ -1,0 +1,78 @@
+{
+  "testedAt": "2026-11-16T09:47:23.541Z",
+  "base": "http://127.0.0.1:3005/api",
+  "total": 14,
+  "passed": 14,
+  "results": [
+    {
+      "id": "FW-01",
+      "title": "POST blocks existing ID overwrite (409) & strips client-supplied IDs",
+      "status": "PASS"
+    },
+    {
+      "id": "FW-02",
+      "title": "cash-accounts blocks direct balance write on POST and PUT",
+      "status": "PASS"
+    },
+    {
+      "id": "FW-03 & FW-04",
+      "title": "Inventory weighted average handles odd division without negative value and ignores master unitCost edits",
+      "status": "PASS"
+    },
+    {
+      "id": "FW-05 & FW-30 & FW-31",
+      "title": "Inactive products/BOMs and product-BOM mismatches are rejected across BOM/Quotation/Production",
+      "status": "PASS"
+    },
+    {
+      "id": "FW-07",
+      "title": "Strict calendar date validation rejects impossible dates like 2026-02-31",
+      "status": "PASS"
+    },
+    {
+      "id": "FW-08 & FW-09",
+      "title": "Inactive accounts & inactive partner IDs are rejected",
+      "status": "PASS"
+    },
+    {
+      "id": "FW-10",
+      "title": "Normalized duplicate invoice code blocked on POST and PUT, released after cancellation",
+      "status": "PASS"
+    },
+    {
+      "id": "FW-11",
+      "title": "Password policy (>72 UTF-8 bytes blocked) & change password revokes old JWTs",
+      "status": "PASS"
+    },
+    {
+      "id": "FW-12..FW-15 & FW-32",
+      "title": "Production orders block protected writes, rescale planned hours on qty edit, require qty>0 and active assignee, and handle concurrent PUT + start",
+      "status": "PASS"
+    },
+    {
+      "id": "FW-21",
+      "title": "DELETE partner blocked when opening-balances exist",
+      "status": "PASS"
+    },
+    {
+      "id": "FW-22 & FW-23",
+      "title": "Blocks CANCELLED creation on txn docs & PUT /workshop invalid settings rolls back",
+      "status": "PASS"
+    },
+    {
+      "id": "FW-24 & FW-25 & FW-26",
+      "title": "Allocation checks partner IDs even with identical names; concurrent transfer delete is safe; fiscal edits & double simulate-code blocked",
+      "status": "PASS"
+    },
+    {
+      "id": "FW-27..FW-29 & FW-33",
+      "title": "Stock cancel blocked post-completion, external FINISHED_RECEIPT stripped, WAREHOUSE machineCost override 403, backdate 409, and service reopen reversal preserves locked period COGS",
+      "status": "PASS"
+    },
+    {
+      "id": "FW-34..FW-38",
+      "title": "Bank import decimals (US & VN), dual debit+credit rejection, scoped dedupe, atomic single-commit & report date range errors",
+      "status": "PASS"
+    }
+  ]
+}

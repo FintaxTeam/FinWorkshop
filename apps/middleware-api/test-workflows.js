@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
-import { calculateInvoice, invoiceDirection, allocationAmounts } from './src/accounting.js';
+import { calculateInvoice, invoiceDirection, allocationAmounts, businessDate } from './src/accounting.js';
 import { adaptSqlAndParams } from './src/db.js';
 
 const base = process.env.TEST_API_URL || 'http://127.0.0.1:3002/api';
@@ -158,7 +158,7 @@ await check('Dashboard TTL avoids audit writes; transaction invalidates cache', 
   const before = await call('GET', '/dashboard'), logsBefore = await call('GET', '/audit-logs', null, 'OWNER');
   const cached = await call('GET', '/dashboard'); assert.deepEqual(cached.metrics, before.metrics);
   assert.equal((await call('GET', '/audit-logs', null, 'OWNER')).length, logsBefore.length);
-  await create('transactions', { date, description: `${tag} thu kiểm cache`, direction: 'INCOME', classification: 'BUSINESS_INCOME', accountId: account.id, amount: 100 });
+  await create('transactions', { date: businessDate(), description: `${tag} thu kiểm cache`, direction: 'INCOME', classification: 'BUSINESS_INCOME', accountId: account.id, amount: 100 });
   assert.equal((await call('GET', '/dashboard')).metrics.revenue, before.metrics.revenue + 100);
 });
 await check('Offline registration durable queue, approval stays pending sync, login blocked', async () => {

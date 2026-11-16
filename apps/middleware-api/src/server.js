@@ -12,9 +12,9 @@ import { createHash, randomBytes, createHmac, randomInt, randomUUID } from 'node
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { initDb, getPool, listRecords, getRecord, getRecordForUpdate, saveRecord, createAudit, decodeData, enqueueOdooSync, odooSyncEntities, DEFAULT_WORKSHOP_ID, DEFAULT_WORKSHOP_NAME, getWorkshop } from './db.js';
+import { initDb, getPool, listRecords, getRecord, getRecordForUpdate, saveRecord, createAudit, decodeData, enqueueOdooSync, odooSyncEntities, DEFAULT_WORKSHOP_ID, DEFAULT_WORKSHOP_NAME, getWorkshop, recordBusinessKey } from './db.js';
 import { seedDemoData,seedWorkshopCatalog } from './seed.js';
-import { businessError, active, invoiceDirection, businessDate } from './accounting.js';
+import { businessError, active, invoiceDirection, businessDate, assertCalendarDate, isValidCalendarDate, validPassword } from './accounting.js';
 import { normalizeInvoice, updateInvoicePartner, allocatePayment, unallocatePayment, voidInvoice, reviseQuotation, transaction } from './workflows.js';
 import { buildBooks } from './ledgers.js';
 import { dashboardSnapshot } from './dashboard.js';
@@ -84,7 +84,7 @@ async function requireAuth(req, res, next) {
   const token = req.headers.authorization?.replace(/^Bearer\s+/i, '');
   if (!token) return res.status(401).json({ error: 'Vui lòng đăng nhập để tiếp tục.' });
   try { req.user = jwt.verify(token, jwtSecret); } catch { return res.status(401).json({ error: 'Phiên đăng nhập hết hạn.' }); }
-  try { const [users] = await getPool().query('SELECT active, role FROM users WHERE id = ? AND workshop_id = ?', [req.user.id, req.user.workshopId || DEFAULT_WORKSHOP_ID]); if (!users[0]?.active || users[0].role !== req.user.role) return res.status(401).json({ error: 'Tài khoản đã bị khóa hoặc quyền đã thay đổi.' }); const wid = req.user.workshopId || DEFAULT_WORKSHOP_ID;
+  try { const [users] = await getPool().query('SELECT active, role, token_version FROM users WHERE id = ? AND workshop_id = ?', [req.user.id, req.user.workshopId || DEFAULT_WORKSHOP_ID]); if (!users[0]?.active || users[0].role !== req.user.role) return res.status(401).json({ error: 'Tài khoản đã bị khóa hoặc quyền đã thay đổi.' }); if (req.user.tokenVersion !== undefined && Number(users[0].token_version || 1) !== Number(req.user.tokenVersion)) return res.status(401).json({ error: 'Phiên đăng nhập đã hết hiệu lực. Vui lòng đăng nhập lại.' }); const wid = req.user.workshopId || DEFAULT_WORKSHOP_ID;
     const [permissions] = await getPool().query('SELECT entities, actions FROM workshop_role_permissions WHERE workshop_id = ? AND role = ?', [wid, req.user.role]);
     if (permissions[0] && roleCaps[req.user.role]) tenantPermissions.set(`${wid}:${req.user.role}`, { entities: decodeData(permissions[0].entities).filter(item => roleCaps[req.user.role].entities.includes(item)), actions: decodeData(permissions[0].actions).filter(item => roleCaps[req.user.role].actions.includes(item)) });
     req.user.roleLabel=roles[req.user.role]?.label; req.user.permissions = permissionsFor(req.user.role, wid); next(); }
@@ -185,28 +185,81 @@ async function updateCashAccount(executor, actorId, { accountId, accountName, de
   if (updated.balance >= 0 && existing) await saveRecord('alerts', { ...existing, status: 'RESOLVED', workshopId: wid, resolvedAt: new Date().toISOString(), resolutionNote: 'Số dư đã được điều chỉnh về không âm.' }, actorId, wid, 'LOCAL_DEMO', executor);
   return updated;
 }
-function parseImportedAmount(value) {
-  if (typeof value === 'number') return value;
-  const raw = String(value ?? '').trim().replace(/[₫đ\s]/gi, '').replace(/[()]/g, (match) => match === '(' ? '-' : '');
+function parseImportedAmount(value, numberFormat = 'AUTO') {
+  if (typeof value === 'number') return Number.isFinite(value) ? Math.round(value) : NaN;
+  const raw = String(value ?? '').trim().replace(/(?:vnd|vnđ|[₫đ\s])/gi, '').replace(/[()]/g, (match) => (match === '(' ? '-' : ''));
   if (!raw) return 0;
-  const normalized = raw.includes(',') && /,\d{1,2}$/.test(raw) && !/\.\d{3}(?:,|$)/.test(raw)
-    ? raw.replace(/\./g, '').replace(',', '.')
-    : raw.replace(/[.,]/g, '');
-  return Number(normalized);
+  if (!/^[+-]?[\d.,]+$/.test(raw)) return NaN;
+  const sign = raw.startsWith('-') ? -1 : 1;
+  const body = raw.replace(/^[+-]/, '');
+  if (!body || !/\d/.test(body)) return NaN;
+  const dots = (body.match(/\./g) || []).length;
+  const commas = (body.match(/,/g) || []).length;
+  let parsed = NaN;
+  if (dots > 0 && commas > 0) {
+    const lastDot = body.lastIndexOf('.');
+    const lastComma = body.lastIndexOf(',');
+    if (lastComma > lastDot) {
+      if (commas > 1 || !/^\d{1,3}(?:\.\d{3})*,\d{1,4}$/.test(body)) return NaN;
+      parsed = Number(body.replace(/\./g, '').replace(',', '.'));
+    } else {
+      if (dots > 1 || !/^\d{1,3}(?:,\d{3})*\.\d{1,4}$/.test(body)) return NaN;
+      parsed = Number(body.replace(/,/g, ''));
+    }
+  } else if (dots > 0) {
+    if (dots > 1) {
+      if (!/^\d{1,3}(?:\.\d{3})+$/.test(body)) return NaN;
+      parsed = Number(body.replace(/\./g, ''));
+    } else if (numberFormat === 'US') {
+      parsed = Number(body);
+    } else if (numberFormat === 'VN') {
+      parsed = /^\d{1,3}\.\d{3}$/.test(body) ? Number(body.replace(/\./g, '')) : Number(body);
+    } else if (/^\d+\.\d{1,2}$/.test(body)) {
+      parsed = Number(body);
+    } else if (/^\d{1,3}\.\d{3}$/.test(body)) {
+      parsed = Number(body.replace(/\./g, ''));
+    } else {
+      parsed = Number(body);
+    }
+  } else if (commas > 0) {
+    if (commas > 1) {
+      if (!/^\d{1,3}(?:,\d{3})+$/.test(body)) return NaN;
+      parsed = Number(body.replace(/,/g, ''));
+    } else if (numberFormat === 'VN') {
+      parsed = Number(body.replace(',', '.'));
+    } else if (/^\d{1,3},\d{3}$/.test(body)) {
+      parsed = Number(body.replace(/,/g, ''));
+    } else if (/^\d+,\d{1,2}$/.test(body)) {
+      parsed = Number(body.replace(',', '.'));
+    } else {
+      parsed = Number(body.replace(',', '.'));
+    }
+  } else {
+    parsed = Number(body);
+  }
+  return Number.isFinite(parsed) ? Math.round(sign * parsed) : NaN;
 }
 function parseImportedDate(value) {
-  if (value instanceof Date && !Number.isNaN(value.valueOf())) return value.toISOString().slice(0, 10);
-  if (typeof value === 'number' && value > 0) return XLSX.SSF.parse_date_code(value)?.y ? `${XLSX.SSF.parse_date_code(value).y}-${String(XLSX.SSF.parse_date_code(value).m).padStart(2, '0')}-${String(XLSX.SSF.parse_date_code(value).d).padStart(2, '0')}` : '';
-  const raw = String(value ?? '').trim();
-  const iso = raw.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
-  if (iso) return `${iso[1]}-${String(iso[2]).padStart(2, '0')}-${String(iso[3]).padStart(2, '0')}`;
-  const local = raw.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
-  return local ? `${local[3]}-${String(local[2]).padStart(2, '0')}-${String(local[1]).padStart(2, '0')}` : '';
+  let candidate = '';
+  if (value instanceof Date && !Number.isNaN(value.valueOf())) candidate = value.toISOString().slice(0, 10);
+  else if (typeof value === 'number' && value > 0) {
+    const parsed = XLSX.SSF.parse_date_code(value);
+    if (parsed?.y) candidate = `${parsed.y}-${String(parsed.m).padStart(2, '0')}-${String(parsed.d).padStart(2, '0')}`;
+  } else {
+    const raw = String(value ?? '').trim();
+    const iso = raw.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[T\s].*)?$/);
+    if (iso) candidate = `${iso[1]}-${String(iso[2]).padStart(2, '0')}-${String(iso[3]).padStart(2, '0')}`;
+    else {
+      const local = raw.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
+      if (local) candidate = `${local[3]}-${String(local[2]).padStart(2, '0')}-${String(local[1]).padStart(2, '0')}`;
+    }
+  }
+  return isValidCalendarDate(candidate) ? candidate : '';
 }
-async function classifyWithRules(record, workshopId = DEFAULT_WORKSHOP_ID) {
+async function classifyWithRules(record, workshopId = DEFAULT_WORKSHOP_ID, executor = getPool()) {
   const wid = workshopId || record.workshopId || DEFAULT_WORKSHOP_ID;
   if (record.classification && record.classification !== 'UNCLASSIFIED') return record;
-  const rules = (await listRecords('classification-rules', wid)).filter((rule) => rule.active !== false && rule.status !== 'INACTIVE');
+  const rules = (await listRecords('classification-rules', wid, executor)).filter((rule) => rule.active !== false && rule.status !== 'INACTIVE');
   for (const rule of rules) {
     const field = ['description', 'counterparty', 'accountName'].includes(rule.matchField) ? rule.matchField : 'description';
     const needle = String(rule.keyword || '').trim().toLocaleLowerCase('vi');
@@ -509,7 +562,7 @@ app.get('/api/health', async (_req, res) => {
 
 app.post('/api/auth/register', authSignupLimit, async (req, res) => {
   const email = normalizeEmail(req.body?.email), name = String(req.body?.name || '').trim(), password = String(req.body?.password || '');
-  if (!validEmail(email) || name.length < 2 || name.length > 190 || password.length < 10 || Buffer.byteLength(password, 'utf8') > 72) return res.status(400).json({ error: 'Nhập tên, email và mật khẩu từ 10 ký tự (tối đa 72 byte UTF-8).' });
+  if (!validEmail(email) || name.length < 2 || name.length > 190 || !validPassword(password)) return res.status(400).json({ error: 'Nhập tên, email và mật khẩu từ 10 ký tự (tối đa 72 byte UTF-8).' });
   const inviteToken = String(req.body?.inviteToken || '');
   const companyName = String(req.body?.workshopName || '').trim();
   const newCompany = !inviteToken && (req.body?.mode === 'CREATE_WORKSHOP' || Boolean(companyName));
@@ -604,7 +657,7 @@ app.post('/api/auth/reset-password', authResetLimit, async (req, res) => {
   const email = normalizeEmail(req.body?.email);
   const code = String(req.body?.code || '').trim();
   const newPassword = String(req.body?.newPassword || '');
-  if (!validEmail(email) || !/^\d{6}$/.test(code) || newPassword.length < 10 || Buffer.byteLength(newPassword, 'utf8') > 72) {
+  if (!validEmail(email) || !/^\d{6}$/.test(code) || !validPassword(newPassword)) {
     return res.status(400).json({ error: 'Email hoặc mã không hợp lệ, hoặc mật khẩu chưa đạt 10 ký tự (tối đa 72 byte UTF-8).' });
   }
   if (!hasOdooConfig()) return res.status(503).json({ error: 'Odoo hiện chưa sẵn sàng.' });
@@ -621,7 +674,7 @@ app.post('/api/auth/reset-password', authResetLimit, async (req, res) => {
 
   const localVerifier = passwordHash;
   await getPool().query(
-    'INSERT INTO users (id, email, full_name, role, password_hash, active) VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE password_hash = VALUES(password_hash)',
+    'INSERT INTO users (id, email, full_name, role, password_hash, active, token_version) VALUES (?, ?, ?, ?, ?, ?, 1) ON CONFLICT (id) DO UPDATE SET password_hash = EXCLUDED.password_hash, token_version = COALESCE(users.token_version, 1) + 1, updated_at = CURRENT_TIMESTAMP',
     [account.source_id, account.email, account.name, account.role, localVerifier, Boolean(account.is_approved)],
   );
   await createAudit({ actor: { id: account.source_id, name: account.name }, action: 'PASSWORD_RESET', entity: 'users', recordId: account.source_id });
@@ -634,16 +687,16 @@ app.post('/api/auth/login', async (req, res) => {
   const user = rows[0];
   if (!user || !(await bcrypt.compare(password, user.password_hash))) return res.status(401).json({ error: 'Email hoặc mật khẩu chưa chính xác.' });
   if (!user.active) return res.status(403).json({ error: 'Tài khoản đang chờ duyệt hoặc đã bị khóa.' });
-  const view = userView(user), token = jwt.sign(view, jwtSecret, { expiresIn: '12h', issuer: 'fintax-middleware' });
+  const view = userView(user), token = jwt.sign({ ...view, tokenVersion: Number(user.token_version || 1) }, jwtSecret, { expiresIn: '12h', issuer: 'fintax-middleware' });
   res.json({ token, user: view });
 });
 
 app.get('/api/auth/me', requireAuth, (req, res) => res.json({ user: { ...req.user, permissions: permissionsFor(req.user.role, req.user.workshopId) } }));
 app.post('/api/auth/password', requireAuth, async (req, res) => {
   const currentPassword = String(req.body?.currentPassword || ''); const newPassword = String(req.body?.newPassword || '');
-  if (newPassword.length < 8) return res.status(400).json({ error: 'Mật khẩu mới cần ít nhất 8 ký tự.' });
+  if (!validPassword(newPassword)) return res.status(400).json({ error: 'Mật khẩu mới cần từ 10 ký tự đến tối đa 72 byte UTF-8.' });
   if (currentPassword === newPassword) return res.status(400).json({ error: 'Mật khẩu mới cần khác mật khẩu hiện tại.' });
-  const [rows] = await getPool().query('SELECT password_hash FROM users WHERE id = ? AND active = TRUE LIMIT 1', [req.user.id]);
+  const [rows] = await getPool().query('SELECT u.*, w.name AS workshop_name FROM users u LEFT JOIN workshops w ON w.id = u.workshop_id WHERE u.id = ? AND u.active = TRUE LIMIT 1', [req.user.id]);
   if (!rows[0]) return res.status(400).json({ error: 'Mật khẩu hiện tại chưa chính xác.' });
   let odooAccount = null;
   if (hasOdooConfig()) {
@@ -655,12 +708,13 @@ app.post('/api/auth/password', requireAuth, async (req, res) => {
   if (odooAccount) {
     try { await updateOdooAuthAccount(odooAccount.id, { password_hash: passwordHash, reset_token_hash: false, reset_token_expires_at: false }); }
     catch (error) { return res.status(503).json({ error: 'Chưa cập nhật được mật khẩu trong Odoo. Vui lòng thử lại.' }); }
-  } else {
-    await getPool().query('UPDATE users SET password_hash = ? WHERE id = ?', [passwordHash, req.user.id]);
   }
-  await getPool().query('UPDATE users SET password_hash = ? WHERE id = ?', [passwordHash, req.user.id]);
+  await getPool().query('UPDATE users SET password_hash = ?, token_version = COALESCE(token_version, 1) + 1 WHERE id = ?', [passwordHash, req.user.id]);
+  const [updatedUsers] = await getPool().query('SELECT token_version FROM users WHERE id = ?', [req.user.id]);
+  const nextVersion = Number(updatedUsers[0]?.token_version || 1);
+  const freshToken = jwt.sign({ ...userView(rows[0]), tokenVersion: nextVersion }, jwtSecret, { expiresIn: '12h', issuer: 'fintax-middleware' });
   await createAudit({ actor: auditActor(req.user), action: 'PASSWORD_CHANGED', entity: 'users', recordId: req.user.id });
-  res.json({ ok: true });
+  res.json({ ok: true, token: freshToken });
 });
 
 app.get('/api/workshop', requireAuth, async (req, res) => {
@@ -674,28 +728,38 @@ app.put('/api/workshop', requireAuth, requireOwner, async (req, res) => {
   const name = String(req.body?.name || '').trim();
   const taxId = req.body?.taxId !== undefined ? String(req.body.taxId).trim() : null;
   const code = req.body?.code !== undefined ? String(req.body.code).trim() : null;
-  if (name && name.length < 2) return res.status(400).json({ error: 'Tên xưởng cần tối thiểu 2 ký tự.' });
+  if (req.body?.name !== undefined && name.length < 2) return res.status(400).json({ error: 'Tên xưởng cần tối thiểu 2 ký tự.' });
   const current = await getWorkshop(wid);
   if (!current) return res.status(404).json({ error: 'Không tìm thấy thông tin xưởng.' });
   const updatedName = name || current.name;
   const updatedTaxId = taxId !== null ? taxId : current.tax_id;
   const updatedCode = code !== null ? code : current.code;
-  await getPool().query(
-    'UPDATE workshops SET name = ?, tax_id = ?, code = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-    [updatedName, updatedTaxId, updatedCode, wid]
-  );
-  const requestedSettings=req.body.settings||{};
-  const settings = { ...current.settings, ...Object.fromEntries(['accountingRegime','taxMethod','defaultWarehouse'].filter(key=>requestedSettings[key]!==undefined).map(key=>[key,requestedSettings[key]])), currency: 'VND', inventoryCostMethod: 'MOVING_AVERAGE' };
+  const requestedSettings = req.body.settings || {};
+  const settings = { ...current.settings, ...Object.fromEntries(['accountingRegime','taxMethod','defaultWarehouse'].filter(key => requestedSettings[key] !== undefined).map(key => [key, requestedSettings[key]])), currency: 'VND', inventoryCostMethod: 'MOVING_AVERAGE' };
   if (req.body.settings) {
     if (!['TT133','HKD_TT152','DEMO'].includes(settings.accountingRegime) || !['VAT_CREDIT','HKD_REVENUE',...(settings.accountingRegime==='DEMO'?['MIXED_DEMO']:[])].includes(settings.taxMethod)) throw businessError('Chọn chế độ kế toán và phương pháp thuế được hỗ trợ.');
     if ((settings.accountingRegime === 'TT133') !== (settings.taxMethod === 'VAT_CREDIT') && settings.accountingRegime !== 'DEMO') throw businessError('Phương pháp thuế không khớp chế độ kế toán.');
     const invoices = await listRecords('invoices', wid);
     if (invoices.some(active) && current.settings?.accountingRegime && (settings.accountingRegime !== current.settings.accountingRegime || settings.taxMethod !== current.settings.taxMethod)) throw businessError('Đã có hóa đơn. Cần chuyển đổi số dư/chế độ theo kỳ trước khi đổi phương pháp.', 409);
-    await getPool().query('UPDATE workshops SET settings = CAST(? AS JSON) WHERE id = ?', [JSON.stringify(settings),wid]);
   }
-  const updated = await getWorkshop(wid);
-  await createAudit({ actor: auditActor(req.user), action: 'WORKSHOP_UPDATED', entity: 'workshops', recordId: wid, workshopId: wid, beforeData: current, afterData: updated });
-  res.json(updated);
+  const connection = await getPool().getConnection();
+  try {
+    await connection.beginTransaction();
+    await connection.query(
+      'UPDATE workshops SET name = ?, tax_id = ?, code = ?, settings = CAST(? AS JSON), updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [updatedName, updatedTaxId, updatedCode, JSON.stringify(req.body.settings ? settings : current.settings), wid]
+    );
+    const [updatedRows] = await connection.query('SELECT id, name, code, tax_id, owner_id, active, settings, created_at FROM workshops WHERE id = ? LIMIT 1', [wid]);
+    const updated = updatedRows[0];
+    await createAudit({ actor: auditActor(req.user), action: 'WORKSHOP_UPDATED', entity: 'workshops', recordId: wid, workshopId: wid, beforeData: current, afterData: updated, executor: connection });
+    await connection.commit();
+    res.json(updated);
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
 });
 
 app.get('/api/users', requireAuth, requireOwner, async (req, res) => {
@@ -711,14 +775,14 @@ app.get('/api/users', requireAuth, requireOwner, async (req, res) => {
   res.json(rows.map((row) => ({ ...userView(row), active: Boolean(row.active), approvalStatus: row.approval_status, odooSyncStatus: row.odoo_sync_status, createdAt: row.created_at })));
 });
 app.post('/api/users', requireAuth, requireOwner, async (req, res) => {
-  const { email, name, role, password } = req.body;
-  if (!validEmail(email) || !name || !roles[role] || !password || password.length < 10) return res.status(400).json({ error: 'Vui lòng nhập tên, email, vai trò và mật khẩu tối thiểu 10 ký tự.' });
+  const email = normalizeEmail(req.body?.email), name = String(req.body?.name || '').trim(), role = req.body?.role, password = String(req.body?.password || '');
+  if (!validEmail(email) || !name || !roles[role] || !validPassword(password)) return res.status(400).json({ error: 'Vui lòng nhập tên, email, vai trò và mật khẩu từ 10 ký tự (tối đa 72 byte UTF-8).' });
   const id = randomUUID();
   const hash = await bcrypt.hash(password, 12);
   const wid = req.user.workshopId || DEFAULT_WORKSHOP_ID;
   try {
-    await getPool().query('INSERT INTO users (id, email, full_name, role, password_hash, active, workshop_id) VALUES (?, ?, ?, ?, ?, TRUE, ?)', [id, String(email).toLowerCase(), name, role, hash, wid]);
-    const user = { id, email: String(email).toLowerCase(), name, role, roleLabel: roles[role].label, workshopId: wid, workshopName: req.user.workshopName };
+    await getPool().query('INSERT INTO users (id, email, full_name, role, password_hash, active, workshop_id) VALUES (?, ?, ?, ?, ?, TRUE, ?)', [id, email, name, role, hash, wid]);
+    const user = { id, email, name, role, roleLabel: roles[role].label, workshopId: wid, workshopName: req.user.workshopName };
     if (hasOdooConfig()) {
       try { await createOdooAuthAccount({ id, email: user.email, name, role, passwordHash: hash, approved: true }); }
       catch (odooError) { console.warn('Could not save the administrator-created account to Odoo:', odooError.message); }
@@ -842,25 +906,27 @@ app.post('/api/transfers', requireAuth, async (req, res) => {
   const amount = Math.round(finiteAmount(req.body?.amount));
   const fromId = String(req.body?.fromAccountId || ''); const toId = String(req.body?.toAccountId || '');
   if (!fromId || !toId || fromId === toId || amount <= 0) return res.status(400).json({ error: 'Chọn hai tài khoản khác nhau và nhập số tiền lớn hơn 0.' });
+  const date = assertCalendarDate(req.body?.date || businessDate(), 'Ngày chuyển tiền', true);
   const wid = req.user.workshopId || DEFAULT_WORKSHOP_ID;
-  const connection = await getPool().getConnection();
-  try {
-    await connection.beginTransaction();
-    const accounts = await listRecords('cash-accounts', wid, connection);
-    const from = accounts.find((row) => row.id === fromId); const to = accounts.find((row) => row.id === toId);
-    if (!from || !to) { await connection.rollback(); return res.status(404).json({ error: 'Không tìm thấy tài khoản tiền.' }); }
-    if ((from.ownerScope || 'BUSINESS') !== (to.ownerScope || 'BUSINESS')) { await connection.rollback(); return res.status(400).json({ error: 'Chuyển nội bộ chỉ áp dụng giữa hai tài khoản cùng phạm vi. Tiền chủ nạp/rút hoặc chi cá nhân cần phân loại riêng.' }); }
-    const group = randomUUID(); const date = String(req.body.date || businessDate());
-    const common = { amount, date, direction: 'TRANSFER', classification: 'INTERNAL_TRANSFER', status: 'CONFIRMED', transferGroup: group, description: String(req.body.note || 'Chuyển tiền nội bộ'), workshopId: wid };
-    const outgoing = await saveRecord('transactions', { ...common, accountId: from.id, accountName: from.name, counterparty: to.name, transferSide: 'OUT' }, req.user.id, wid, 'LOCAL_DEMO', connection);
-    const incoming = await saveRecord('transactions', { ...common, accountId: to.id, accountName: to.name, counterparty: from.name, transferSide: 'IN' }, req.user.id, wid, 'LOCAL_DEMO', connection);
-    await updateCashAccount(connection, req.user.id, { accountId: from.id, delta: -amount }, wid);
-    await updateCashAccount(connection, req.user.id, { accountId: to.id, delta: amount }, wid);
-    await connection.commit();
-    await createAudit({ actor: auditActor(req.user), action: 'INTERNAL_TRANSFER_CREATED', entity: 'transactions', recordId: group, workshopId: wid, afterData: { outgoing, incoming } });
-    res.status(201).json({ transferGroup: group, transactions: [outgoing, incoming] });
-  } catch (error) { await connection.rollback(); throw error; }
-  finally { connection.release(); }
+  const { outgoing, incoming, group } = await transaction(wid, async (connection) => {
+    const orderedIds = [fromId, toId].sort();
+    const first = await getRecordForUpdate('cash-accounts', orderedIds[0], wid, connection);
+    const second = await getRecordForUpdate('cash-accounts', orderedIds[1], wid, connection);
+    const byId = new Map([[first?.id, first], [second?.id, second]]);
+    const from = byId.get(fromId), to = byId.get(toId);
+    if (!from || !to) throw businessError('Không tìm thấy tài khoản tiền.', 404);
+    if (!active(from) || from.status === 'INACTIVE' || !active(to) || to.status === 'INACTIVE') throw businessError('Không thể chuyển tiền với tài khoản đã ngừng sử dụng.', 409);
+    if ((from.ownerScope || 'BUSINESS') !== (to.ownerScope || 'BUSINESS')) throw businessError('Chuyển nội bộ chỉ áp dụng giữa hai tài khoản cùng phạm vi. Tiền chủ nạp/rút hoặc chi cá nhân cần phân loại riêng.');
+    const transferGroup = randomUUID();
+    const common = { amount, date, direction: 'TRANSFER', classification: 'INTERNAL_TRANSFER', status: 'CONFIRMED', transferGroup, description: String(req.body.note || 'Chuyển tiền nội bộ'), workshopId: wid };
+    const outTx = await saveRecord('transactions', { ...common, accountId: from.id, accountName: from.name, counterparty: to.name, transferSide: 'OUT' }, req.user.id, wid, 'LOCAL_DEMO', connection);
+    const inTx = await saveRecord('transactions', { ...common, accountId: to.id, accountName: to.name, counterparty: from.name, transferSide: 'IN' }, req.user.id, wid, 'LOCAL_DEMO', connection);
+    const sortedDeltas = [[from.id, -amount], [to.id, amount]].sort((a, b) => a[0].localeCompare(b[0]));
+    for (const [accId, delta] of sortedDeltas) await updateCashAccount(connection, req.user.id, { accountId: accId, delta }, wid);
+    return { outgoing: outTx, incoming: inTx, group: transferGroup };
+  });
+  await createAudit({ actor: auditActor(req.user), action: 'INTERNAL_TRANSFER_CREATED', entity: 'transactions', recordId: group, workshopId: wid, afterData: { outgoing, incoming } });
+  res.status(201).json({ transferGroup: group, transactions: [outgoing, incoming] });
 });
 
 app.get('/api/reports/books', requireAuth, async (req, res) => {
@@ -941,18 +1007,27 @@ app.post('/api/:entity', requireAuth, requireEntity, async (req, res) => {
   const requiredCreateAction = workshopMovement ? 'record-movement' : workshopLaborLog ? 'record-labor' : 'create';
   if (!canAct(req, requiredCreateAction)) return res.status(403).json({ error: 'Vai trò hiện tại không được tạo dữ liệu ở phân hệ này.' });
   const wid = req.user.workshopId || DEFAULT_WORKSHOP_ID;
+  if (req.body?.id && await getRecord(entity, String(req.body.id), wid)) return res.status(409).json({ error: 'Không thể ghi đè chứng từ đã tồn tại qua thao tác tạo mới.' });
+  if (['transactions', 'payments', 'invoices', 'quotations', 'production-orders', 'reconciliations'].includes(entity) && ['CANCELLED', 'VOID', 'UNALLOCATED', 'DEMO_ARCHIVED'].includes(String(req.body?.status || '').toUpperCase())) {
+    return res.status(400).json({ error: 'Không thể tạo chứng từ mới ở trạng thái đã hủy hoặc ngừng hiệu lực.' });
+  }
   if (entity === 'stock-movements') return res.status(201).json(operationalView(entity,await createStockMovement(req.body,auditActor(req.user)),req.user.role));
   if (entity === 'opening-balances') return res.status(201).json(await createOpeningBalance(req.body,auditActor(req.user)));
   let value;
   try { value = normalizeRecord({ ...req.body, id: undefined, workshopId: wid }); }
   catch (error) { return res.status(400).json({ error: error.message }); }
+  if (value.date !== undefined && String(value.date || '').trim() !== '') assertCalendarDate(String(value.date), 'Ngày chứng từ', true);
+  if (value.dueDate !== undefined && String(value.dueDate || '').trim() !== '') assertCalendarDate(String(value.dueDate), 'Hạn thanh toán', true);
+  if (value.validUntil !== undefined && String(value.validUntil || '').trim() !== '') assertCalendarDate(String(value.validUntil), 'Ngày hiệu lực', true);
+  if (value.effectiveFrom !== undefined && String(value.effectiveFrom || '').trim() !== '') assertCalendarDate(String(value.effectiveFrom), 'Hiệu lực từ ngày', true);
+  if (value.effectiveTo !== undefined && String(value.effectiveTo || '').trim() !== '') assertCalendarDate(String(value.effectiveTo), 'Hiệu lực đến ngày', true);
   value = await validateMaster(entity,value,null,auditActor(req.user));
   if (entity === 'boms') value = await normalizeBom(value,wid);
   if (entity === 'tax-rules') { value.vatRate = Number(value.vatRate || 0); value.pitRate = Number(value.pitRate || 0); value.taxRate = value.vatRate + (value.taxMode === 'HKD_REVENUE' ? value.pitRate : 0); if (!Number.isFinite(value.taxRate) || value.taxRate < 0 || value.taxRate > 100) throw businessError('Thuế suất không hợp lệ.'); }
   if (entity === 'quotations') value = await normalizeQuotation(value,wid);
 
   if (entity === 'invoices') {
-    value = await normalizeInvoice({ ...req.body, workshopId: wid }, wid);
+    value = await normalizeInvoice({ ...req.body, id: undefined, workshopId: wid }, wid);
     value.paidAmount = 0; value.settledAmount = 0; value.openBalance = finiteAmount(value.total); value.paymentStatus = 'UNPAID';
     value.status = 'REVIEW_REQUIRED'; value.verification ||= 'Chờ rà soát thủ công';
     value.statusHistory = [{ status: value.status, at: new Date().toISOString(), actor: req.user.name, note: 'Tạo hóa đơn; chờ rà soát thủ công.' }];
@@ -961,16 +1036,28 @@ app.post('/api/:entity', requireAuth, requireEntity, async (req, res) => {
   if (entity === 'quotations') { value.status = 'DRAFT'; value.version = 1; }
   if (entity === 'production-orders') {
     if(value.assignedTo){const [assigned]=await getPool().query('SELECT id FROM users WHERE workshop_id=? AND active=TRUE AND (id=? OR full_name=?)',[wid,value.assignedTo,value.assignedTo]);if(!assigned[0])throw businessError('Người phụ trách không thuộc doanh nghiệp.');}
-    if(value.productId){const product=await getRecord('products',value.productId,wid);if(!product)throw businessError('Sản phẩm không thuộc doanh nghiệp.');value.productName=product.name;}
-    if(value.bomId){const bom=await getRecord('boms',value.bomId,wid);if(!bom||!active(bom)||bom.productId&&bom.productId!==value.productId)throw businessError('Định mức không khớp sản phẩm.');value.bom=structuredClone(bom);value.laborRate=bom.laborRate;value.plannedLaborHours=Number(bom.laborHours||0)*Number(value.quantity||0);value.plannedMachineCost=Number(bom.machineCost||0)*Number(value.quantity||0);}
-    value.quantity=value.quantity??1;if(!Number.isFinite(Number(value.quantity))||Number(value.quantity)<=0)throw businessError('Số lượng lệnh phải lớn hơn 0.');if(!String(value.productName||'').trim())throw businessError('Nhập sản phẩm hoặc dịch vụ cho lệnh.');value.code ||= `SX-${Date.now()}`;
-    value.status='DRAFT'; value.progress=0; value.laborHours=0; value.date ||= businessDate(); if(value.productId && !(await getRecord('products',value.productId,wid))) throw businessError('Sản phẩm không thuộc doanh nghiệp.'); }
-  if (entity === 'payments') { value.allocatedAmount = 0; value.unallocatedAmount = finiteAmount(value.amount); value.status = 'CONFIRMED'; if (finiteAmount(value.amount) <= 0) throw businessError('Số tiền phải lớn hơn 0.'); }
-  if (['transactions', 'payments', 'invoices', 'stock-movements', 'labor-logs', 'payment-allocations', 'reconciliations'].includes(entity)) value.date ||= businessDate();
-  if (entity === 'tax-periods') { if (!/^\d{4}-\d{2}-\d{2}$/.test(value.startDate || '') || !/^\d{4}-\d{2}-\d{2}$/.test(value.endDate || '') || value.endDate < value.startDate) throw businessError('Nhập ngày bắt đầu/kết thúc kỳ hợp lệ.'); value.status = 'OPEN'; }
+    value.quantity = value.quantity ?? 1;
+    if(!Number.isFinite(Number(value.quantity))||Number(value.quantity)<=0)throw businessError('Số lượng lệnh phải lớn hơn 0.');
+    if(value.productId){const product=await getRecord('products',value.productId,wid);if(!product||!active(product)||product.status==='INACTIVE')throw businessError('Sản phẩm không thuộc doanh nghiệp hoặc đã ngừng hoạt động.');value.productName=product.name;}
+    if(value.bomId){const bom=await getRecord('boms',value.bomId,wid);if(!bom||!active(bom)||bom.status==='INACTIVE'||bom.productId&&bom.productId!==value.productId)throw businessError('Định mức không tồn tại, đã ngừng dùng hoặc không khớp sản phẩm.');value.bom=structuredClone(bom);value.laborRate=bom.laborRate;value.plannedLaborHours=Number(bom.laborHours||0)*Number(value.quantity);value.plannedMachineCost=Number(bom.machineCost||0)*Number(value.quantity);}
+    if(!String(value.productName||'').trim())throw businessError('Nhập sản phẩm hoặc dịch vụ cho lệnh.');value.code ||= `SX-${Date.now()}`;
+    value.status='DRAFT'; value.progress=0; value.laborHours=0; value.date ||= businessDate();
+  }
+  if (entity === 'payments') {
+    value.allocatedAmount = 0; value.unallocatedAmount = finiteAmount(value.amount); value.status = 'CONFIRMED';
+    if (finiteAmount(value.amount) <= 0) throw businessError('Số tiền phải lớn hơn 0.');
+    if (value.counterpartyId) {
+      const partnerEntity = value.direction === 'RECEIVED' ? 'customers' : 'suppliers';
+      const partner = await getRecord(partnerEntity, value.counterpartyId, wid);
+      if (!partner || !active(partner) || partner.status === 'INACTIVE') throw businessError('Đối tác thanh toán không tồn tại hoặc đã ngừng hoạt động.');
+      value.counterparty = partner.name;
+    }
+  }
+  if (['transactions', 'payments', 'invoices', 'stock-movements', 'labor-logs', 'payment-allocations', 'reconciliations'].includes(entity)) value.date = assertCalendarDate(value.date || businessDate(), 'Ngày chứng từ', true);
+  if (entity === 'tax-periods') { assertCalendarDate(value.startDate, 'Ngày bắt đầu kỳ', true); assertCalendarDate(value.endDate, 'Ngày kết thúc kỳ', true); if (value.endDate < value.startDate) throw businessError('Nhập ngày bắt đầu/kết thúc kỳ hợp lệ.'); value.status = 'OPEN'; }
   if (entity === 'reconciliations') value.status = 'UNRESOLVED';
   if (entity === 'cash-accounts') {
-    value.openingBalance = Math.round(finiteAmount(value.openingBalance ?? value.balance));
+    value.openingBalance = Math.round(finiteAmount(value.openingBalance ?? 0));
     value.balance = value.openingBalance;
   }
   if (entity === 'transactions' && !['INCOME', 'EXPENSE', 'TRANSFER'].includes(value.direction)) return res.status(400).json({ error: 'Chọn loại giao dịch thu, chi hoặc chuyển nội bộ.' });
@@ -978,48 +1065,48 @@ app.post('/api/:entity', requireAuth, requireEntity, async (req, res) => {
   if (['transactions', 'payments'].includes(entity) && !value.accountId) return res.status(400).json({ error: 'Chọn tài khoản tiền để cập nhật số dư.' });
   let saved;
   if (entity === 'invoices') {
-    const connection = await getPool().getConnection();
-    try {
-      await connection.beginTransaction();
-      saved = await saveRecord(entity, value, req.user.id, wid, 'LOCAL_DEMO', connection);
-      await updateInvoicePartner(connection, req.user.id, saved, finiteAmount(saved.total), wid);
-      await connection.commit();
-    } catch (error) { await connection.rollback(); throw error; }
-    finally { connection.release(); }
+    saved = await transaction(wid, async (connection) => {
+      const row = await saveRecord(entity, value, req.user.id, wid, 'LOCAL_DEMO', connection);
+      await updateInvoicePartner(connection, req.user.id, row, finiteAmount(row.total), wid);
+      return row;
+    });
   } else if (entity === 'payment-allocations') {
     saved = await allocatePayment(value, auditActor(req.user));
   } else if (entity === 'transactions' || entity === 'payments' || entity === 'labor-logs') {
     if (entity === 'transactions' && value.direction === 'TRANSFER') return res.status(400).json({ error: 'Để chuyển tiền nội bộ, hãy dùng thao tác “Chuyển nội bộ” để tạo cặp giao dịch cân bằng.' });
-    const connection = await getPool().getConnection();
-    try {
-      await connection.beginTransaction();
+    saved = await transaction(wid, async (connection) => {
       if (entity === 'transactions') {
-        const selectedAccount = value.accountId ? await getRecord('cash-accounts', value.accountId, wid, connection) : null;
-        if (value.accountId && !selectedAccount) { await connection.rollback(); return res.status(400).json({ error: 'Không tìm thấy tài khoản tiền đã chọn.' }); }
+        const selectedAccount = value.accountId ? await getRecordForUpdate('cash-accounts', value.accountId, wid, connection) : null;
+        if (value.accountId && !selectedAccount) throw businessError('Không tìm thấy tài khoản tiền đã chọn.', 400);
+        if (selectedAccount && (!active(selectedAccount) || selectedAccount.status === 'INACTIVE')) throw businessError('Tài khoản tiền đã ngừng sử dụng; không thể ghi giao dịch mới.', 409);
         if (selectedAccount) value.accountName = selectedAccount.name;
-        if (!value.classification || value.classification === 'UNCLASSIFIED') value = await classifyWithRules(value, wid);
+        if (!value.classification || value.classification === 'UNCLASSIFIED') value = await classifyWithRules(value, wid, connection);
         value.classification ||= 'UNCLASSIFIED';
-        if (!classificationCompatible(value.direction, value.classification)) { await connection.rollback(); return res.status(400).json({ error: 'Nhóm phân loại không khớp chiều thu/chi.' }); }
-        value.status ||= 'NEEDS_REVIEW';
-        saved = await saveRecord(entity, value, req.user.id, wid, 'LOCAL_DEMO', connection);
-        const delta = value.direction === 'INCOME' ? finiteAmount(value.amount) : -finiteAmount(value.amount);
-        if (value.accountId || value.accountName) await updateCashAccount(connection, req.user.id, { accountId: value.accountId, accountName: value.accountName, delta }, wid);
+        if (!classificationCompatible(value.direction, value.classification)) throw businessError('Nhóm phân loại không khớp chiều thu/chi.');
+        if (req.body?.status !== undefined && !['NEEDS_REVIEW', 'CONFIRMED'].includes(String(req.body.status))) throw businessError('Trạng thái giao dịch mới không hợp lệ.');
+        value.status = value.status === 'CONFIRMED' ? 'CONFIRMED' : 'NEEDS_REVIEW';
+        const row = await saveRecord(entity, value, req.user.id, wid, 'LOCAL_DEMO', connection);
+        const delta = row.direction === 'INCOME' ? finiteAmount(row.amount) : -finiteAmount(row.amount);
+        if (active(row) && (row.accountId || row.accountName)) await updateCashAccount(connection, req.user.id, { accountId: row.accountId, accountName: row.accountName, delta }, wid);
+        return row;
       } else if (entity === 'payments') {
-        const selectedAccount = value.accountId ? await getRecord('cash-accounts', value.accountId, wid, connection) : null;
-        if (value.accountId && !selectedAccount) { await connection.rollback(); return res.status(400).json({ error: 'Không tìm thấy tài khoản tiền đã chọn.' }); }
+        const selectedAccount = value.accountId ? await getRecordForUpdate('cash-accounts', value.accountId, wid, connection) : null;
+        if (value.accountId && !selectedAccount) throw businessError('Không tìm thấy tài khoản tiền đã chọn.', 400);
+        if (selectedAccount && (!active(selectedAccount) || selectedAccount.status === 'INACTIVE')) throw businessError('Tài khoản tiền đã ngừng sử dụng; không thể ghi thanh toán mới.', 409);
         if (selectedAccount) value.accountName = selectedAccount.name;
-        saved = await saveRecord(entity, value, req.user.id, wid, 'LOCAL_DEMO', connection);
-        const isReceipt = value.direction === 'RECEIVED';
-        const transaction = await saveRecord('transactions', { date: value.date, description: `Thanh toán ${value.code || saved.id} · ${value.counterparty || ''}`, counterparty: value.counterparty, amount: finiteAmount(value.amount), direction: isReceipt ? 'INCOME' : 'EXPENSE', classification: 'UNCLASSIFIED', status: 'NEEDS_REVIEW', accountId: value.accountId || '', accountName: value.accountName || '', paymentId: saved.id, source: 'PAYMENT', workshopId: wid }, req.user.id, wid, 'LOCAL_DEMO', connection);
-        saved = { ...saved, transactionId: transaction.id };
-        await saveRecord(entity, saved, req.user.id, wid, 'LOCAL_DEMO', connection);
-        if (value.accountId || value.accountName) await updateCashAccount(connection, req.user.id, { accountId: value.accountId, accountName: value.accountName, delta: (isReceipt ? 1 : -1) * finiteAmount(value.amount) }, wid);
+        let row = await saveRecord(entity, value, req.user.id, wid, 'LOCAL_DEMO', connection);
+        const isReceipt = row.direction === 'RECEIVED';
+        const linkedTx = await saveRecord('transactions', { date: row.date, description: `Thanh toán ${row.code || row.id} · ${row.counterparty || ''}`, counterparty: row.counterparty, amount: finiteAmount(row.amount), direction: isReceipt ? 'INCOME' : 'EXPENSE', classification: 'UNCLASSIFIED', status: 'NEEDS_REVIEW', accountId: row.accountId || '', accountName: row.accountName || '', paymentId: row.id, source: 'PAYMENT', workshopId: wid }, req.user.id, wid, 'LOCAL_DEMO', connection);
+        row = { ...row, transactionId: linkedTx.id };
+        await saveRecord(entity, row, req.user.id, wid, 'LOCAL_DEMO', connection);
+        if (row.accountId || row.accountName) await updateCashAccount(connection, req.user.id, { accountId: row.accountId, accountName: row.accountName, delta: (isReceipt ? 1 : -1) * finiteAmount(row.amount) }, wid);
+        return row;
       } else {
         const job = value.productionOrderId ? await getRecordForUpdate('production-orders', value.productionOrderId, wid, connection) : null;
-        if (!job) { await connection.rollback(); return res.status(404).json({ error: 'Chọn lệnh sản xuất hợp lệ.' }); }
-        if (workshopLaborLog && job.assignedTo !== req.user.name && job.assignedTo !== req.user.id) { await connection.rollback(); return res.status(403).json({ error: 'Bạn chỉ được ghi giờ công cho lệnh được phân công.' }); }
+        if (!job) throw businessError('Chọn lệnh sản xuất hợp lệ.', 404);
+        if (workshopLaborLog && job.assignedTo !== req.user.name && job.assignedTo !== req.user.id) throw businessError('Bạn chỉ được ghi giờ công cho lệnh được phân công.', 403);
         const hours = finiteAmount(value.hours);
-        if (hours <= 0) { await connection.rollback(); return res.status(400).json({ error: 'Số giờ công phải lớn hơn 0.' }); }
+        if (hours <= 0) throw businessError('Số giờ công phải lớn hơn 0.');
         if (!['DRAFT','IN_PROGRESS'].includes(job.status)) throw businessError('Lệnh không nhận thêm giờ công.',409);
         const approvedRate = finiteAmount(job.laborRate);
         if (req.user.role === 'WORKSHOP' && value.hourlyRate !== undefined && Number(value.hourlyRate) !== approvedRate) throw businessError('Thợ chỉ ghi giờ công; đơn giá lấy từ lệnh đã duyệt.',403);
@@ -1027,12 +1114,11 @@ app.post('/api/:entity', requireAuth, requireEntity, async (req, res) => {
         const daily=(await listRecords('labor-logs',wid,connection)).filter(row=>active(row)&&row.employeeName===req.user.name&&row.date===(value.date||businessDate())).reduce((sum,row)=>sum+finiteAmount(row.hours),0);
         if (hours > 24 || daily+hours>24) throw businessError('Tổng giờ công của một người trong ngày không quá 24 giờ.');
         value.hourlyRate = req.user.role === 'WORKSHOP' ? approvedRate : finiteAmount(value.hourlyRate ?? job.laborRate); value.employeeName = req.user.name; value.date ||= businessDate();
-        saved = await saveRecord(entity, value, req.user.id, wid, 'LOCAL_DEMO', connection);
+        const row = await saveRecord(entity, value, req.user.id, wid, 'LOCAL_DEMO', connection);
         await saveRecord('production-orders', { ...job, laborHours: finiteAmount(job.laborHours) + hours, workshopId: wid }, req.user.id, wid, 'LOCAL_DEMO', connection);
+        return row;
       }
-      await connection.commit();
-    } catch (error) { await connection.rollback(); throw error; }
-    finally { connection.release(); }
+    });
   } else saved = await saveRecord(entity, value, req.user.id, wid, 'LOCAL_DEMO');
   await createAudit({ actor: auditActor(req.user), action: 'RECORD_CREATED', entity, recordId: saved.id, workshopId: wid, afterData: saved });
   res.status(201).json(operationalView(entity,saved,req.user.role));
@@ -1045,66 +1131,121 @@ app.put('/api/:entity/:id', requireAuth, requireEntity, async (req, res) => {
   if (['transactions', 'payments', 'payment-allocations', 'stock-movements', 'labor-logs','opening-balances'].includes(entity)) return res.status(409).json({ error: 'Bản ghi đã ghi sổ không sửa trực tiếp. Hãy dùng thao tác phân loại, điều chỉnh hoặc hủy có lưu vết.' });
   if (entity === 'tax-periods' && req.user.role !== 'OWNER') return res.status(403).json({ error: 'Chỉ chủ xưởng được quản lý trạng thái kỳ.' });
   const wid = req.user.workshopId || DEFAULT_WORKSHOP_ID;
-  const before = await getRecord(entity, req.params.id, wid);
-  if (!before) return res.status(404).json({ error: 'Không tìm thấy dữ liệu.' });
-  if (!active(before)) throw businessError('Không sửa dữ liệu đã hủy.', 409);
-  if (before.status === 'LOCKED' || before.periodStatus === 'LOCKED') return res.status(409).json({ error: 'Dữ liệu thuộc kỳ đã khóa. Hãy mở khóa theo quy trình được cấp quyền.' });
-  let value;
-  try { value = normalizeRecord({ ...before, ...req.body, id: before.id, workshopId: wid }); }
-  catch (error) { return res.status(400).json({ error: error.message }); }
-  if (entity === 'production-orders') {
-    if (req.body.productId) {const product=await getRecord('products',req.body.productId,wid);if(!product||!active(product))throw businessError('Sản phẩm không thuộc doanh nghiệp.');value.productName=product.name;}
-    if (req.body.bomId && before.status==='DRAFT') {const bom=await getRecord('boms',req.body.bomId,wid);if(!bom||!active(bom)||bom.productId&&bom.productId!==value.productId)throw businessError('Định mức không khớp sản phẩm.');value.bom=structuredClone(bom);value.laborRate=bom.laborRate;value.plannedLaborHours=Number(bom.laborHours||0)*Number(value.quantity||0);value.plannedMachineCost=Number(bom.machineCost||0)*Number(value.quantity||0);}
-    if (req.body.status && req.body.status !== before.status || ['progress','laborHours','actualMaterialCost','actualLaborCost','totalCost','finishedReceiptId'].some(key => Object.hasOwn(req.body,key)&&req.body[key]!==before[key])) throw businessError('Cập nhật lệnh bằng thao tác tiến độ/nghiệm thu.',409);
-    if (before.status !== 'DRAFT' && ['productId','quantity','bom','bomId','laborRate','plannedMachineCost'].some(key=>Object.hasOwn(req.body,key)&&JSON.stringify(req.body[key])!==JSON.stringify(before[key]))) throw businessError('Lệnh đã bắt đầu; không sửa định mức/đơn giá trực tiếp.',409);
-  }
-  if (entity === 'reconciliations') { if (before.status === 'MATCHED') throw businessError('Chủ xưởng cần mở lại đối soát trước khi sửa.', 409); value.status = 'UNRESOLVED'; }
-  if (entity === 'tax-periods' && req.body.status !== undefined && req.body.status !== before.status) return res.status(409).json({ error: 'Dùng thao tác khóa/mở kỳ để lưu lý do và audit log đầy đủ.' });
-  value = await validateMaster(entity,value,before,auditActor(req.user));
-  if (entity === 'boms') value = await normalizeBom(value,wid);
-  if (entity === 'quotations') value = await normalizeQuotation(value,wid,req.body);
-  if (entity === 'quotations' && ['APPROVED', 'ACCEPTED', 'SENT', 'REJECTED'].includes(before.status)) return res.status(201).json(await reviseQuotation(before.id, auditActor(req.user), value));
-  if (entity === 'quotations' && req.body.status !== undefined && req.body.status !== before.status) return res.status(409).json({ error: 'Dùng thao tác gửi duyệt hoặc duyệt để đổi trạng thái báo giá.' });
-  if (entity === 'invoices') {
-    if ((await listRecords('stock-movements',wid)).some(row=>active(row)&&row.invoiceId===before.id)) throw businessError('Hóa đơn đã gắn phiếu kho; xử lý phiếu kho trước khi sửa.',409);
-    if (!active(before)) throw businessError('Không sửa hóa đơn đã hủy.', 409);
-    if (finiteAmount(before.settledAmount ?? before.paidAmount) > 0) throw businessError('Gỡ phân bổ trước khi sửa hóa đơn.', 409);
-    const merged = { ...before, ...req.body };
-    if (req.body.total === undefined && req.body.totalAmount === undefined) { delete merged.total; delete merged.totalAmount; }
-    if (req.body.taxAmount === undefined) delete merged.taxAmount;
-    value = await normalizeInvoice(merged, wid);
-    if (finiteAmount(value.total) < finiteAmount(before.paidAmount)) return res.status(409).json({ error: 'Tổng hóa đơn không thể thấp hơn các khoản thanh toán đã phân bổ.' });
-    const duplicate = liveRows(await listRecords(entity, wid)).some((row) => row.id !== before.id && row.code === value.code);
-    if (duplicate) return res.status(409).json({ error: 'Số hóa đơn đã được sử dụng.' });
-    value.status = before.status; value.statusHistory = before.statusHistory || [];
-    value.paidAmount = finiteAmount(before.paidAmount); value.openBalance = finiteAmount(value.total) - value.paidAmount; value.paymentStatus = before.paymentStatus || 'UNPAID';
-  }
-  if (['products', 'materials'].includes(entity)) { if (req.body.inputTaxRate !== undefined) value.inputTaxRuleId = null; if (req.body.outputTaxRate !== undefined) value.outputTaxRuleId = null; }
-  if (entity === 'tax-rules') { value.vatRate = Number(value.vatRate || 0); value.pitRate = Number(value.pitRate || 0); value.taxRate = value.vatRate + (value.taxMode === 'HKD_REVENUE' ? value.pitRate : 0); if (!Number.isFinite(value.taxRate) || value.taxRate < 0 || value.taxRate > 100) throw businessError('Thuế suất không hợp lệ.'); }
-  if (entity === 'cash-accounts' && req.body.openingBalance !== undefined) {
-    const priorOpening = finiteAmount(before.openingBalance ?? before.balance);
-    const nextOpening = finiteAmount(value.openingBalance);
-    value.openingBalance = nextOpening;
-    value.balance = Math.round(finiteAmount(before.balance) + nextOpening - priorOpening);
-  }
-  let saved;
-  if (entity === 'invoices') {
-    const connection = await getPool().getConnection();
-    try {
-      await connection.beginTransaction();
-      await connection.query('SELECT pg_advisory_xact_lock(hashtext(?))', [`period:${wid}`]);
-      const current = await getRecordForUpdate(entity, before.id, wid, connection);
-      if (!current || !active(current) || finiteAmount(current.settledAmount ?? current.paidAmount) > 0 || current.total !== before.total || current.direction !== before.direction || current.counterparty !== before.counterparty) throw businessError('Hóa đơn vừa thay đổi. Tải lại trước khi sửa.', 409);
+
+  const outcome = await transaction(wid, async (connection) => {
+    const before = await getRecordForUpdate(entity, req.params.id, wid, connection);
+    if (!before) return { status: 404, body: { error: 'Không tìm thấy dữ liệu.' } };
+    if (!active(before)) throw businessError('Không sửa dữ liệu đã hủy.', 409);
+    if (before.status === 'LOCKED' || before.periodStatus === 'LOCKED') return { status: 409, body: { error: 'Dữ liệu thuộc kỳ đã khóa. Hãy mở khóa theo quy trình được cấp quyền.' } };
+
+    if (entity === 'cash-accounts' && Object.hasOwn(req.body || {}, 'balance') && Number(req.body.balance) !== Number(before.balance)) {
+      throw businessError('Số dư tài khoản chỉ thay đổi qua giao dịch thu/chi hoặc cập nhật số dư đầu kỳ.', 409);
+    }
+
+    let value;
+    try { value = normalizeRecord({ ...before, ...req.body, id: before.id, workshopId: wid }); }
+    catch (error) { return { status: 400, body: { error: error.message } }; }
+
+    if (value.date !== undefined && String(value.date || '').trim() !== '') assertCalendarDate(String(value.date), 'Ngày chứng từ', true);
+    if (value.dueDate !== undefined && String(value.dueDate || '').trim() !== '') assertCalendarDate(String(value.dueDate), 'Hạn thanh toán', true);
+    if (value.validUntil !== undefined && String(value.validUntil || '').trim() !== '') assertCalendarDate(String(value.validUntil), 'Ngày hiệu lực', true);
+    if (value.effectiveFrom !== undefined && String(value.effectiveFrom || '').trim() !== '') assertCalendarDate(String(value.effectiveFrom), 'Hiệu lực từ ngày', true);
+    if (value.effectiveTo !== undefined && String(value.effectiveTo || '').trim() !== '') assertCalendarDate(String(value.effectiveTo), 'Hiệu lực đến ngày', true);
+
+    if (entity === 'production-orders') {
+      const protectedFields = ['progress', 'laborHours', 'actualMaterialCost', 'actualLaborCost', 'actualMachineCost', 'totalCost', 'unitCost', 'finishedReceiptId', 'startedAt', 'completedAt', 'completedDate', 'acceptedAt', 'acceptedDate', 'serviceCostEvents'];
+      if ((req.body.status !== undefined && req.body.status !== before.status) || protectedFields.some(key => Object.hasOwn(req.body || {}, key) && JSON.stringify(req.body[key]) !== JSON.stringify(before[key]))) {
+        throw businessError('Cập nhật lệnh bằng thao tác tiến độ/nghiệm thu.', 409);
+      }
+      if (before.status !== 'DRAFT' && ['productId', 'quantity', 'bom', 'bomId', 'laborRate', 'plannedMachineCost', 'plannedLaborHours'].some(key => Object.hasOwn(req.body || {}, key) && JSON.stringify(req.body[key]) !== JSON.stringify(before[key]))) {
+        throw businessError('Lệnh đã bắt đầu; không sửa định mức/đơn giá trực tiếp.', 409);
+      }
+      if (!Number.isFinite(Number(value.quantity)) || Number(value.quantity) <= 0) throw businessError('Số lượng lệnh phải lớn hơn 0.');
+      if (req.body.assignedTo !== undefined && value.assignedTo) {
+        const [assigned] = await connection.query('SELECT id FROM users WHERE workshop_id = ? AND active = TRUE AND (id = ? OR full_name = ?)', [wid, value.assignedTo, value.assignedTo]);
+        if (!assigned[0]) throw businessError('Người phụ trách không thuộc doanh nghiệp hoặc đã ngừng hoạt động.');
+      }
+      if (req.body.productId) {
+        const product = await getRecord('products', req.body.productId, wid, connection);
+        if (!product || !active(product) || product.status === 'INACTIVE') throw businessError('Sản phẩm không thuộc doanh nghiệp hoặc đã ngừng hoạt động.');
+        value.productName = product.name;
+      }
+      if (before.status === 'DRAFT' && (req.body.bomId !== undefined || req.body.quantity !== undefined)) {
+        if (req.body.bomId) {
+          const bom = await getRecord('boms', req.body.bomId, wid, connection);
+          if (!bom || !active(bom) || bom.status === 'INACTIVE' || (bom.productId && bom.productId !== value.productId)) throw businessError('Định mức không tồn tại, đã ngừng dùng hoặc không khớp sản phẩm.');
+          value.bom = structuredClone(bom);
+          value.laborRate = bom.laborRate;
+        } else if (req.body.bomId === '' || req.body.bomId === null) {
+          value.bom = null;
+          value.bomId = '';
+        }
+        if (value.bom) {
+          if (!Object.hasOwn(req.body, 'plannedLaborHours')) value.plannedLaborHours = Number(value.bom.laborHours || 0) * Number(value.quantity);
+          if (!Object.hasOwn(req.body, 'plannedMachineCost')) value.plannedMachineCost = Number(value.bom.machineCost || 0) * Number(value.quantity);
+        } else if (req.body.quantity !== undefined && Number(before.quantity) > 0) {
+          const ratio = Number(value.quantity) / Number(before.quantity);
+          if (!Object.hasOwn(req.body, 'plannedLaborHours') && before.plannedLaborHours) value.plannedLaborHours = Number(before.plannedLaborHours) * ratio;
+          if (!Object.hasOwn(req.body, 'plannedMachineCost') && before.plannedMachineCost) value.plannedMachineCost = Math.round(Number(before.plannedMachineCost) * ratio);
+        }
+      }
+    }
+
+    if (entity === 'reconciliations') { if (before.status === 'MATCHED') throw businessError('Chủ xưởng cần mở lại đối soát trước khi sửa.', 409); value.status = 'UNRESOLVED'; }
+    if (entity === 'tax-periods') {
+      if (req.body.status !== undefined && req.body.status !== before.status) return { status: 409, body: { error: 'Dùng thao tác khóa/mở kỳ để lưu lý do và audit log đầy đủ.' } };
+      assertCalendarDate(value.startDate, 'Ngày bắt đầu kỳ', true);
+      assertCalendarDate(value.endDate, 'Ngày kết thúc kỳ', true);
+      if (value.endDate < value.startDate) throw businessError('Ngày kết thúc kỳ phải sau hoặc bằng ngày bắt đầu.');
+    }
+
+    value = await validateMaster(entity, value, before, auditActor(req.user), connection);
+    if (entity === 'boms') value = await normalizeBom(value, wid, connection);
+    if (entity === 'quotations') value = await normalizeQuotation(value, wid, req.body, connection);
+    if (entity === 'quotations' && ['APPROVED', 'ACCEPTED', 'SENT', 'REJECTED'].includes(before.status)) {
+      const revised = await reviseQuotation(before.id, auditActor(req.user), value, connection);
+      return { status: 201, body: revised, skipGenericAudit: true };
+    }
+    if (entity === 'quotations' && req.body.status !== undefined && req.body.status !== before.status) return { status: 409, body: { error: 'Dùng thao tác gửi duyệt hoặc duyệt để đổi trạng thái báo giá.' } };
+
+    if (entity === 'invoices') {
+      if ((await listRecords('stock-movements', wid, connection)).some(row => active(row) && row.invoiceId === before.id)) throw businessError('Hóa đơn đã gắn phiếu kho; xử lý phiếu kho trước khi sửa.', 409);
+      if (finiteAmount(before.settledAmount ?? before.paidAmount) > 0) throw businessError('Gỡ phân bổ trước khi sửa hóa đơn.', 409);
+      const merged = { ...before, ...req.body };
+      if (req.body.total === undefined && req.body.totalAmount === undefined) { delete merged.total; delete merged.totalAmount; }
+      if (req.body.taxAmount === undefined) delete merged.taxAmount;
+      if (((req.body.counterpartyId !== undefined && req.body.counterpartyId !== before.counterpartyId) || (req.body.counterparty !== undefined && req.body.counterparty !== before.counterparty)) && req.body.taxCode === undefined) {
+        merged.taxCode = '';
+      }
+      value = await normalizeInvoice(merged, wid, connection);
+      if (before.mockTaxCode) {
+        const fiscalChanged = value.total !== before.total || value.subtotal !== before.subtotal || value.taxAmount !== before.taxAmount || finiteAmount(value.discountAmount) !== finiteAmount(before.discountAmount) || value.code !== before.code || value.date !== before.date || (value.counterpartyId || '') !== (before.counterpartyId || '') || value.counterparty !== before.counterparty || (value.taxCode || '') !== (before.taxCode || '') || JSON.stringify(value.items || []) !== JSON.stringify(before.items || []);
+        if (fiscalChanged) throw businessError('Hóa đơn đã cấp mã mô phỏng; không thể sửa tiền, thuế, ngày hoặc đối tác. Hãy hủy và lập hóa đơn mới.', 409);
+      }
+      if (finiteAmount(value.total) < finiteAmount(before.paidAmount)) return { status: 409, body: { error: 'Tổng hóa đơn không thể thấp hơn các khoản thanh toán đã phân bổ.' } };
+      const nextKey = recordBusinessKey('invoices', value);
+      const duplicate = liveRows(await listRecords(entity, wid, connection)).some((row) => row.id !== before.id && String(row.code || '').trim() && recordBusinessKey('invoices', row) === nextKey);
+      if (duplicate) return { status: 409, body: { error: 'Số hóa đơn đã được sử dụng.' } };
+      value.status = before.status; value.statusHistory = before.statusHistory || [];
+      value.paidAmount = finiteAmount(before.paidAmount); value.openBalance = finiteAmount(value.total) - value.paidAmount; value.paymentStatus = before.paymentStatus || 'UNPAID';
+    }
+
+    if (['products', 'materials'].includes(entity)) { if (req.body.inputTaxRate !== undefined) value.inputTaxRuleId = null; if (req.body.outputTaxRate !== undefined) value.outputTaxRuleId = null; }
+    if (entity === 'tax-rules') { value.vatRate = Number(value.vatRate || 0); value.pitRate = Number(value.pitRate || 0); value.taxRate = value.vatRate + (value.taxMode === 'HKD_REVENUE' ? value.pitRate : 0); if (!Number.isFinite(value.taxRate) || value.taxRate < 0 || value.taxRate > 100) throw businessError('Thuế suất không hợp lệ.'); }
+
+    let saved;
+    if (entity === 'invoices') {
       saved = await saveRecord(entity, value, req.user.id, wid, 'LOCAL_DEMO', connection);
       await updateInvoicePartner(connection, req.user.id, before, -finiteAmount(before.openBalance ?? before.total), wid);
       await updateInvoicePartner(connection, req.user.id, saved, finiteAmount(saved.openBalance ?? saved.total), wid);
-      await connection.commit();
-    } catch (error) { await connection.rollback(); throw error; }
-    finally { connection.release(); }
-  } else if(['materials','products','customers','suppliers'].includes(entity)) saved=await transaction(wid,async connection=>{const current=await getRecordForUpdate(entity,before.id,wid,connection);if(!current)throw businessError('Danh mục không tồn tại.',404);const updated=await validateMaster(entity,{...current,...req.body,id:current.id,workshopId:wid},current,auditActor(req.user));return saveRecord(entity,updated,req.user.id,wid,connection);});
-  else saved = await saveRecord(entity, value, req.user.id, wid, 'LOCAL_DEMO');
-  await createAudit({ actor: auditActor(req.user), action: 'RECORD_UPDATED', entity, recordId: saved.id, workshopId: wid, beforeData: before, afterData: saved });
-  res.json(saved);
+    } else {
+      saved = await saveRecord(entity, value, req.user.id, wid, 'LOCAL_DEMO', connection);
+    }
+    await createAudit({ actor: auditActor(req.user), action: 'RECORD_UPDATED', entity, recordId: saved.id, workshopId: wid, beforeData: before, afterData: saved, executor: connection });
+    return { status: 200, body: saved };
+  });
+
+  res.status(outcome.status).json(outcome.body);
 });
 
 app.delete('/api/:entity/:id', requireAuth, requireEntity, async (req, res) => {
@@ -1112,83 +1253,64 @@ app.delete('/api/:entity/:id', requireAuth, requireEntity, async (req, res) => {
   const entity = req.params.entity;
   if (['payment-allocations', 'labor-logs', 'tax-periods'].includes(entity)) return res.status(409).json({ error: 'Chứng từ này cần xử lý theo luồng điều chỉnh.' });
   const wid = req.user.workshopId || DEFAULT_WORKSHOP_ID;
-  const before = await getRecord(entity, req.params.id, wid);
-  if (!before) return res.status(404).json({ error: 'Không tìm thấy chứng từ.' });
-  if (entity === 'stock-movements') return res.json(await cancelStockMovement(before.id,auditActor(req.user),req.body.reason));
-  if (entity === 'opening-balances') throw businessError('Số dư đầu kỳ cần quy trình điều chỉnh, không hủy trực tiếp.',409);
-  if (entity === 'production-orders' && (before.finishedReceiptId || (await listRecords('stock-movements',wid)).some(row=>active(row)&&row.productionOrderId===before.id) || (await listRecords('labor-logs',wid)).some(row=>active(row)&&row.productionOrderId===before.id))) throw businessError('Lệnh đã phát sinh vật tư/giờ công; xử lý phát sinh trước khi hủy.',409);
-  if (before.status === 'CANCELLED') return res.status(409).json({ error: 'Chứng từ đã được hủy.' });
-  if (before.status === 'LOCKED' || before.periodStatus === 'LOCKED') return res.status(409).json({ error: 'Không hủy chứng từ trong kỳ đã khóa.' });
-  if (['customers', 'suppliers', 'materials', 'products', 'boms', 'cash-accounts', 'branches', 'tax-rules', 'quotations', 'production-orders'].includes(entity)) {
-    const [references] = await getPool().query('SELECT entity, data FROM records WHERE workshop_id = ? AND entity IN (?)', [wid, ['invoices', 'payments', 'stock-movements', 'quotations', 'boms', 'production-orders', 'transactions', 'products', 'materials']]);
-    const fields = entity === 'cash-accounts' ? ['accountId', 'fromAccountId', 'toAccountId'] : entity === 'tax-rules' ? ['taxRuleId', 'inputTaxRuleId', 'outputTaxRuleId'] : entity === 'materials' ? ['materialId'] : entity === 'products' ? ['productId'] : entity === 'boms' ? ['bomId'] : entity === 'quotations' ? ['quotationId'] : entity === 'production-orders' ? ['productionOrderId'] : entity === 'branches' ? ['branchId'] : ['counterpartyId', 'customerId', 'supplierId'];
-    const matches = (value) => value && typeof value === 'object' && Object.entries(value).some(([key, nested]) => fields.includes(key) && nested === before.id || typeof nested === 'object' && (Array.isArray(nested) ? nested.some(matches) : matches(nested)));
-    if (references.some((reference) => { const row = decodeData(reference.data); return row.id !== before.id && active(row) && (matches(row) || ['customers', 'suppliers'].includes(entity) && row.counterparty === before.name); })) throw businessError('Danh mục đang được chứng từ sử dụng; điều chỉnh liên kết trước khi hủy.', 409);
-  }
-  const now = new Date().toISOString();
   const reason = String(req.body?.reason || '').trim();
-  if (!reason) throw businessError('Bắt buộc nhập lý do hủy.');
-  if (entity === 'invoices') return res.json(await voidInvoice(before.id, auditActor(req.user), reason, req.body?.autoUnallocate === true));
-  let saved;
-  if (['transactions', 'payments', 'stock-movements'].includes(entity) || entity === 'invoices') {
-    const connection = await getPool().getConnection();
-    try {
-      await connection.beginTransaction();
-      if (entity === 'transactions') {
-        const locked = await getRecordForUpdate(entity, before.id, wid, connection);
-        if (!locked || locked.status === 'CANCELLED') { await connection.rollback(); return res.status(409).json({ error: 'Giao dịch đã hủy hoặc đã thay đổi.' }); }
-        if (locked.status === 'LOCKED' || locked.periodStatus === 'LOCKED') { await connection.rollback(); return res.status(409).json({ error: 'Không hủy chứng từ trong kỳ đã khóa.' }); }
-        if (locked.paymentId || locked.allocationId) throw businessError('Hủy phiếu thanh toán hoặc gỡ phân bổ để điều chỉnh giao dịch liên kết.', 409);
-        const pair = locked.transferGroup ? liveRows(await listRecords(entity, wid, connection)).filter((row) => row.transferGroup === locked.transferGroup) : [locked];
-        for (const candidate of pair) {
-          const row = candidate.id === locked.id ? locked : await getRecordForUpdate(entity, candidate.id, wid, connection);
-          if (!row || row.status === 'CANCELLED') continue;
-          if (row.status === 'LOCKED' || row.periodStatus === 'LOCKED') { await connection.rollback(); return res.status(409).json({ error: 'Không hủy cặp chuyển tiền trong kỳ đã khóa.' }); }
-          const cancelled = { ...row, status: 'CANCELLED', cancelledAt: now, cancellationReason: reason, workshopId: wid };
-          await saveRecord(entity, cancelled, req.user.id, wid, 'LOCAL_DEMO', connection);
-          const delta = row.direction === 'INCOME' ? -finiteAmount(row.amount) : row.direction === 'EXPENSE' ? finiteAmount(row.amount) : row.transferSide === 'IN' ? -finiteAmount(row.amount) : finiteAmount(row.amount);
-          await updateCashAccount(connection, req.user.id, { accountId: row.accountId, accountName: row.accountName, delta }, wid);
-        }
-        saved = { ...locked, status: 'CANCELLED', cancelledAt: now, cancellationReason: reason, transferGroup: locked.transferGroup || '', workshopId: wid };
-      } else if (entity === 'payments') {
-        const payment = await getRecordForUpdate(entity, before.id, wid, connection);
-        if (!payment || payment.status === 'CANCELLED' || payment.status === 'LOCKED' || payment.periodStatus === 'LOCKED') { await connection.rollback(); return res.status(409).json({ error: 'Phiếu thanh toán đã hủy, khóa hoặc thay đổi.' }); }
-        const [allocRows] = await connection.query("SELECT data FROM records WHERE entity = ? AND workshop_id = ? AND JSON_UNQUOTE(JSON_EXTRACT(data, '$.paymentId')) = ?", ['payment-allocations', wid, payment.id]);
-        const allocated = allocRows.filter((row) => active(decodeData(row.data))).reduce((sum, row) => sum + finiteAmount(decodeData(row.data).allocatedAmount), 0);
-        if (allocated > 0 || finiteAmount(payment.allocatedAmount) > 0) { await connection.rollback(); return res.status(409).json({ error: 'Gỡ các khoản phân bổ trước khi hủy phiếu thanh toán.' }); }
-        const linkedTransaction = payment.transactionId ? await getRecordForUpdate('transactions', payment.transactionId, wid, connection) : null;
-        saved = { ...payment, status: 'CANCELLED', cancelledAt: now, cancellationReason: reason, workshopId: wid };
-        await saveRecord(entity, saved, req.user.id, wid, 'LOCAL_DEMO', connection);
-        if (linkedTransaction && linkedTransaction.status !== 'CANCELLED') await saveRecord('transactions', { ...linkedTransaction, status: 'CANCELLED', cancelledAt: now, cancellationReason: reason, workshopId: wid }, req.user.id, wid, 'LOCAL_DEMO', connection);
-        const delta = payment.direction === 'RECEIVED' ? -finiteAmount(payment.amount) : finiteAmount(payment.amount);
-        await updateCashAccount(connection, req.user.id, { accountId: payment.accountId, accountName: payment.accountName, delta }, wid);
-      } else if (entity === 'stock-movements') {
-        const movement = await getRecordForUpdate(entity, before.id, wid, connection);
-        if (!movement || movement.status === 'CANCELLED' || movement.status === 'LOCKED' || movement.periodStatus === 'LOCKED') { await connection.rollback(); return res.status(409).json({ error: 'Phiếu kho đã hủy, khóa hoặc thay đổi.' }); }
-        const materialMatch = movement.materialId ? { id: movement.materialId } : (await listRecords('materials', wid, connection)).find((row) => row.name === movement.materialName);
-        const material = materialMatch ? await getRecordForUpdate('materials', materialMatch.id, wid, connection) : null;
-        if (!material) { await connection.rollback(); return res.status(409).json({ error: 'Không tìm thấy vật tư để hoàn lại tồn kho.' }); }
-        const delta = movement.type === 'RETURN' ? -finiteAmount(movement.quantity) : finiteAmount(movement.quantity);
-        if (finiteAmount(material.stock) + delta < 0) { await connection.rollback(); return res.status(409).json({ error: 'Không hủy phiếu trả vì số vật tư đã được xuất dùng tiếp.' }); }
-        saved = { ...movement, status: 'CANCELLED', cancelledAt: now, cancellationReason: reason, workshopId: wid };
-        await saveRecord(entity, saved, req.user.id, wid, 'LOCAL_DEMO', connection);
-        await saveRecord('materials', { ...material, stock: finiteAmount(material.stock) + delta, workshopId: wid }, req.user.id, wid, 'LOCAL_DEMO', connection);
-      } else {
-        const invoice = await getRecordForUpdate(entity, before.id, wid, connection);
-        if (!invoice || invoice.status === 'CANCELLED' || invoice.status === 'LOCKED' || invoice.periodStatus === 'LOCKED') { await connection.rollback(); return res.status(409).json({ error: 'Hóa đơn đã hủy, khóa hoặc thay đổi.' }); }
-        if (finiteAmount(invoice.paidAmount) > 0) { await connection.rollback(); return res.status(409).json({ error: 'Gỡ phân bổ thanh toán trước khi hủy hóa đơn.' }); }
-        saved = { ...invoice, status: 'CANCELLED', cancelledAt: now, cancellationReason: reason, statusHistory: [...(invoice.statusHistory || []), { status: 'CANCELLED', at: now, actor: req.user.name, note: reason }], workshopId: wid };
-        await saveRecord(entity, saved, req.user.id, wid, 'LOCAL_DEMO', connection);
-        await updateInvoicePartner(connection, req.user.id, invoice, -finiteAmount(invoice.total), wid);
+  if (entity === 'stock-movements') return res.json(await cancelStockMovement(req.params.id, auditActor(req.user), reason));
+  if (entity === 'opening-balances') throw businessError('Số dư đầu kỳ cần quy trình điều chỉnh, không hủy trực tiếp.', 409);
+  if (entity === 'invoices') return res.json(await voidInvoice(req.params.id, auditActor(req.user), reason, req.body?.autoUnallocate === true));
+
+  const saved = await transaction(wid, async (connection) => {
+    const before = await getRecordForUpdate(entity, req.params.id, wid, connection);
+    if (!before) throw businessError('Không tìm thấy chứng từ.', 404);
+    if (entity === 'production-orders' && (before.finishedReceiptId || (await listRecords('stock-movements', wid, connection)).some(row => active(row) && row.productionOrderId === before.id) || (await listRecords('labor-logs', wid, connection)).some(row => active(row) && row.productionOrderId === before.id))) throw businessError('Lệnh đã phát sinh vật tư/giờ công; xử lý phát sinh trước khi hủy.', 409);
+    if (before.status === 'CANCELLED') throw businessError('Chứng từ đã được hủy.', 409);
+    if (before.status === 'LOCKED' || before.periodStatus === 'LOCKED') throw businessError('Không hủy chứng từ trong kỳ đã khóa.', 409);
+    if (['customers', 'suppliers', 'materials', 'products', 'boms', 'cash-accounts', 'branches', 'tax-rules', 'quotations', 'production-orders'].includes(entity)) {
+      const [references] = await connection.query('SELECT entity, data FROM records WHERE workshop_id = ? AND entity IN (?)', [wid, ['invoices', 'payments', 'opening-balances', 'stock-movements', 'quotations', 'boms', 'production-orders', 'transactions', 'products', 'materials']]);
+      const fields = entity === 'cash-accounts' ? ['accountId', 'fromAccountId', 'toAccountId'] : entity === 'tax-rules' ? ['taxRuleId', 'inputTaxRuleId', 'outputTaxRuleId'] : entity === 'materials' ? ['materialId'] : entity === 'products' ? ['productId'] : entity === 'boms' ? ['bomId'] : entity === 'quotations' ? ['quotationId'] : entity === 'production-orders' ? ['productionOrderId'] : entity === 'branches' ? ['branchId'] : ['counterpartyId', 'customerId', 'supplierId', 'partnerId'];
+      const matches = (value) => value && typeof value === 'object' && Object.entries(value).some(([key, nested]) => fields.includes(key) && nested === before.id || typeof nested === 'object' && (Array.isArray(nested) ? nested.some(matches) : matches(nested)));
+      if (references.some((reference) => { const row = decodeData(reference.data); return row.id !== before.id && active(row) && (matches(row) || ['customers', 'suppliers'].includes(entity) && (row.counterparty === before.name || row.partnerName === before.name)); })) throw businessError('Danh mục đang được chứng từ sử dụng; điều chỉnh liên kết trước khi hủy.', 409);
+    }
+    const now = new Date().toISOString();
+    if (!reason) throw businessError('Bắt buộc nhập lý do hủy.');
+
+    let result;
+    if (entity === 'transactions') {
+      if (before.paymentId || before.allocationId) throw businessError('Hủy phiếu thanh toán hoặc gỡ phân bổ để điều chỉnh giao dịch liên kết.', 409);
+      const pair = before.transferGroup
+        ? liveRows(await listRecords(entity, wid, connection)).filter((row) => row.transferGroup === before.transferGroup).sort((a, b) => a.id.localeCompare(b.id))
+        : [before];
+      const accountDeltas = [];
+      for (const candidate of pair) {
+        const row = candidate.id === before.id ? before : await getRecordForUpdate(entity, candidate.id, wid, connection);
+        if (!row || row.status === 'CANCELLED') continue;
+        if (row.status === 'LOCKED' || row.periodStatus === 'LOCKED') throw businessError('Không hủy cặp chuyển tiền trong kỳ đã khóa.', 409);
+        const cancelled = { ...row, status: 'CANCELLED', cancelledAt: now, cancellationReason: reason, workshopId: wid };
+        await saveRecord(entity, cancelled, req.user.id, wid, 'LOCAL_DEMO', connection);
+        const delta = row.direction === 'INCOME' ? -finiteAmount(row.amount) : row.direction === 'EXPENSE' ? finiteAmount(row.amount) : row.transferSide === 'IN' ? -finiteAmount(row.amount) : finiteAmount(row.amount);
+        accountDeltas.push({ accountId: row.accountId, accountName: row.accountName, delta });
       }
-      await connection.commit();
-    } catch (error) { await connection.rollback(); throw error; }
-    finally { connection.release(); }
-  } else {
-    saved = { ...before, status: 'CANCELLED', cancelledAt: now, cancellationReason: reason, workshopId: wid };
-    await saveRecord(entity, saved, req.user.id, wid, 'LOCAL_DEMO');
-  }
-  await createAudit({ actor: auditActor(req.user), action: 'RECORD_CANCELLED', entity, recordId: saved.id, workshopId: wid, beforeData: before, afterData: saved });
+      accountDeltas.sort((a, b) => String(a.accountId || a.accountName || '').localeCompare(String(b.accountId || b.accountName || '')));
+      for (const entry of accountDeltas) {
+        await updateCashAccount(connection, req.user.id, entry, wid);
+      }
+      result = { ...before, status: 'CANCELLED', cancelledAt: now, cancellationReason: reason, transferGroup: before.transferGroup || '', workshopId: wid };
+    } else if (entity === 'payments') {
+      const [allocRows] = await connection.query("SELECT data FROM records WHERE entity = ? AND workshop_id = ? AND JSON_UNQUOTE(JSON_EXTRACT(data, '$.paymentId')) = ?", ['payment-allocations', wid, before.id]);
+      const allocated = allocRows.filter((row) => active(decodeData(row.data))).reduce((sum, row) => sum + finiteAmount(decodeData(row.data).allocatedAmount), 0);
+      if (allocated > 0 || finiteAmount(before.allocatedAmount) > 0) throw businessError('Gỡ các khoản phân bổ trước khi hủy phiếu thanh toán.', 409);
+      const linkedTransaction = before.transactionId ? await getRecordForUpdate('transactions', before.transactionId, wid, connection) : null;
+      result = { ...before, status: 'CANCELLED', cancelledAt: now, cancellationReason: reason, workshopId: wid };
+      await saveRecord(entity, result, req.user.id, wid, 'LOCAL_DEMO', connection);
+      if (linkedTransaction && linkedTransaction.status !== 'CANCELLED') await saveRecord('transactions', { ...linkedTransaction, status: 'CANCELLED', cancelledAt: now, cancellationReason: reason, workshopId: wid }, req.user.id, wid, 'LOCAL_DEMO', connection);
+      const delta = before.direction === 'RECEIVED' ? -finiteAmount(before.amount) : finiteAmount(before.amount);
+      await updateCashAccount(connection, req.user.id, { accountId: before.accountId, accountName: before.accountName, delta }, wid);
+    } else {
+      result = { ...before, status: 'CANCELLED', cancelledAt: now, cancellationReason: reason, workshopId: wid };
+      await saveRecord(entity, result, req.user.id, wid, 'LOCAL_DEMO', connection);
+    }
+    await createAudit({ actor: auditActor(req.user), action: 'RECORD_CANCELLED', entity, recordId: result.id, workshopId: wid, beforeData: before, afterData: result, executor: connection });
+    return result;
+  });
   res.json(saved);
 });
 
@@ -1212,12 +1334,25 @@ app.post('/api/:entity/:id/actions/:action', requireAuth, requireEntity, async (
   else if (action === 'accept' && entity === 'quotations' && ['OWNER', 'ACCOUNTANT'].includes(req.user.role) && before.status === 'SENT') { after.status = 'ACCEPTED'; after.acceptedAt = new Date().toISOString(); }
   else if (action === 'create-production' && entity === 'quotations' && ['OWNER', 'ACCOUNTANT'].includes(req.user.role) && before.status === 'ACCEPTED') {
     if (before.productionOrderId) return res.status(409).json({ error: 'Báo giá này đã được chuyển thành lệnh sản xuất.' });
+    const targetProductId = before.productId || before.bom?.productId || null;
+    if (targetProductId) {
+      const product = await getRecord('products', targetProductId, wid);
+      if (!product || !active(product) || product.status === 'INACTIVE') throw businessError('Sản phẩm trên báo giá không tồn tại hoặc đã ngừng hoạt động.');
+    }
+    if (before.bomId || before.bom) {
+      const bom = before.bomId ? await getRecord('boms', before.bomId, wid) : before.bom;
+      if (!bom || !active(bom) || bom.status === 'INACTIVE') throw businessError('Công thức làm (BOM) không tồn tại hoặc đã ngừng dùng.');
+      const bomProductId = bom.productId || before.bom?.productId || null;
+      if (targetProductId && bomProductId && targetProductId !== bomProductId) throw businessError('Công thức làm (BOM) không khớp sản phẩm của báo giá.');
+    }
+    if (req.body?.dueDate !== undefined && String(req.body.dueDate || '').trim() !== '') assertCalendarDate(String(req.body.dueDate), 'Hạn hoàn thành', true);
     if(req.body.assignedTo){const [assigned]=await getPool().query('SELECT id FROM users WHERE workshop_id=? AND active=TRUE AND (id=? OR full_name=?)',[wid,req.body.assignedTo,req.body.assignedTo]);if(!assigned[0])throw businessError('Người phụ trách không thuộc doanh nghiệp.');}
     const code = `SX-${new Date().getFullYear()}-${randomUUID().replaceAll('-', '').slice(0, 6).toUpperCase()}`;
-    createdProduction = { id: randomUUID(), code, quotationId: before.id, quotationCode: before.code, productName: before.title, customerName: before.customerName, quantity: finiteAmount(before.quantity), productId: before.productId || before.bom?.productId || null, bomId: before.bomId || null, bom: before.bom ? structuredClone(before.bom) : null, items: structuredClone(before.items || []), laborRate: finiteAmount(before.laborRate), plannedLaborHours: finiteAmount(before.laborHours)*finiteAmount(before.quantity), laborHours: 0, plannedMachineCost: finiteAmount(before.machineCost)*finiteAmount(before.quantity), costEstimate: finiteAmount(before.costEstimate)*finiteAmount(before.quantity), date: businessDate(), assignedTo: String(req.body?.assignedTo || ''), stage: 'Chờ phân công', progress: 0, status: 'DRAFT', dueDate: String(req.body?.dueDate || ''), workshopId: wid };
+    createdProduction = { id: randomUUID(), code, quotationId: before.id, quotationCode: before.code, productName: before.title, customerName: before.customerName, quantity: finiteAmount(before.quantity), productId: targetProductId, bomId: before.bomId || null, bom: before.bom ? structuredClone(before.bom) : null, items: structuredClone(before.items || []), laborRate: finiteAmount(before.laborRate), plannedLaborHours: finiteAmount(before.laborHours)*finiteAmount(before.quantity), laborHours: 0, plannedMachineCost: finiteAmount(before.machineCost)*finiteAmount(before.quantity), costEstimate: finiteAmount(before.costEstimate)*finiteAmount(before.quantity), date: businessDate(), assignedTo: String(req.body?.assignedTo || ''), stage: 'Chờ phân công', progress: 0, status: 'DRAFT', dueDate: String(req.body?.dueDate || ''), workshopId: wid };
     after.productionOrderId = createdProduction.id; after.productionCreatedAt = new Date().toISOString();
   }
   else if (action === 'simulate-code' && entity === 'invoices' && invoiceDirection(before) === 'OUTPUT') {
+    if (before.mockTaxCode) return res.status(409).json({ error: `Hóa đơn đã có mã mô phỏng (${before.mockTaxCode}). Không cấp lại mã trên cùng hóa đơn.` });
     try {
       const response = await axios.post(`${taxApiUrl}/api/v1/invoices/issue`, { invoiceId: id, invoiceCode: before.code, total: before.total }, { timeout: 5000 });
       after.status = 'DEMO_CODE_ISSUED'; after.mockTaxCode = response.data.mockTaxCode; after.simulatedAt = response.data.issuedAt; after.verification = 'Đã mô phỏng';
@@ -1247,7 +1382,7 @@ app.post('/api/:entity/:id/actions/:action', requireAuth, requireEntity, async (
   if (entity === 'invoices' && after.status !== before.status) after.statusHistory = [...(before.statusHistory || []), { status: after.status, at: new Date().toISOString(), actor: req.user.name, note: after.verification || after.mockTaxCode || action }];
   const saved = await transaction(wid, async (connection) => {
     const current = await getRecordForUpdate(entity, id, wid, connection);
-    if (!current || current.status !== before.status || current.productionOrderId !== before.productionOrderId) throw businessError('Bản ghi vừa thay đổi; hãy tải lại.', 409);
+    if (!current || current.status !== before.status || current.productionOrderId !== before.productionOrderId || current.mockTaxCode !== before.mockTaxCode) throw businessError('Bản ghi vừa thay đổi; hãy tải lại.', 409);
     if (createdProduction) await saveRecord('production-orders', createdProduction, req.user.id, wid, connection);
     const value = await saveRecord(entity, after, req.user.id, wid, connection);
     await createAudit({ actor: auditActor(req.user), action: action.toUpperCase(), entity, recordId: id, workshopId: wid, beforeData: before, afterData: value, executor: connection });
@@ -1256,76 +1391,108 @@ app.post('/api/:entity/:id/actions/:action', requireAuth, requireEntity, async (
   res.json(createdProduction ? { ...saved, createdProduction } : saved);
 });
 
+function importRowDuplicateKey(row) {
+  const direction = row.direction || '';
+  const ref = String(row.externalReference || '').trim();
+  if (ref) return `${direction}|REF|${ref}`;
+  return `${direction}|FP|${row.date || ''}|${Number(row.amount || 0)}|${String(row.description || '').trim().toLocaleLowerCase('vi')}`;
+}
+
 app.post('/api/import/transactions/preview', requireAuth, upload.single('file'), async (req, res) => {
   if (req.user.role === 'WORKSHOP' || !canEntity(req.user, 'transactions') || !canAct(req, 'create')) return res.status(403).json({ error: 'Không đủ quyền import sao kê.' });
   if (!req.file) return res.status(400).json({ error: 'Chọn file CSV hoặc XLSX.' });
   const extension = path.extname(req.file.originalname).toLowerCase();
   if (!['.csv', '.xlsx', '.xls'].includes(extension)) return res.status(415).json({ error: 'Chỉ hỗ trợ file CSV, XLS hoặc XLSX.' });
   let workbook;
-  try { workbook = XLSX.read(req.file.buffer, { type: 'buffer', cellDates: true }); }
+  try { workbook = XLSX.read(req.file.buffer, { type: 'buffer', cellDates: extension !== '.csv', raw: extension === '.csv' }); }
   catch { return res.status(400).json({ error: 'Không đọc được file. Hãy kiểm tra định dạng và thử lại.' }); }
   const wid = req.user.workshopId || DEFAULT_WORKSHOP_ID;
+  const previewAccountId = String(req.body?.accountId || req.query?.accountId || '').trim();
+  const numberFormat = ['AUTO', 'VN', 'US'].includes(String(req.body?.numberFormat || req.query?.numberFormat || 'AUTO').toUpperCase())
+    ? String(req.body?.numberFormat || req.query?.numberFormat || 'AUTO').toUpperCase()
+    : 'AUTO';
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
   const sourceRows = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: true });
-  const existing = liveRows(await listRecords('transactions', wid));
-  const seenReferences = new Set(existing.map((item) => item.externalReference).filter(Boolean));
-  const seenFingerprints = new Set(existing.map((item) => `${item.date}|${item.amount}|${String(item.description || '').trim().toLocaleLowerCase('vi')}`));
+  const existing = liveRows(await listRecords('transactions', wid)).filter((item) => !previewAccountId || item.accountId === previewAccountId);
+  const seenKeys = new Set(existing.map((item) => importRowDuplicateKey(item)));
   const rows = [];
   for (const [index, row] of sourceRows.entries()) {
     const normalized = Object.fromEntries(Object.entries(row).map(([key, value]) => [key.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, ''), value]));
-    const credit = parseImportedAmount(normalized.credit ?? normalized.tienvao ?? normalized.ghico);
-    const debit = parseImportedAmount(normalized.debit ?? normalized.tienra ?? normalized.ghino);
+    const credit = parseImportedAmount(normalized.credit ?? normalized.tienvao ?? normalized.ghico, numberFormat);
+    const debit = parseImportedAmount(normalized.debit ?? normalized.tienra ?? normalized.ghino, numberFormat);
     const rawAmount = normalized.amount ?? normalized.sotien ?? normalized.giaodich;
-    const amount = parseImportedAmount(rawAmount || (credit > 0 ? credit : debit));
+    const parsedRawAmount = rawAmount !== undefined && String(rawAmount).trim() !== '' ? parseImportedAmount(rawAmount, numberFormat) : null;
+    const bothSidesPositive = Number.isFinite(credit) && Number.isFinite(debit) && credit > 0 && debit > 0;
+    const negativeAmount = (Number.isFinite(credit) && credit < 0) || (Number.isFinite(debit) && debit < 0) || (parsedRawAmount !== null && Number.isFinite(parsedRawAmount) && parsedRawAmount < 0);
+    const amount = bothSidesPositive ? 0 : parsedRawAmount !== null ? parsedRawAmount : (Number.isFinite(credit) && credit > 0 ? credit : debit);
     const rawDate = normalized.date ?? normalized.ngaygiaodich ?? normalized.ngay ?? '';
     const date = parseImportedDate(rawDate);
     const description = String(normalized.description ?? normalized.noidung ?? normalized.diengiai ?? normalized.remark ?? '').trim();
     const reference = String(normalized.reference ?? normalized.transactionid ?? normalized.magiaodich ?? normalized.sogiaodich ?? '').trim();
     const rawDirection = String(normalized.direction ?? normalized.loai ?? normalized.type ?? '').toLocaleLowerCase('vi');
-    const direction = credit > 0 || /thu|income|credit|ghi co|ghi có|cr\b/.test(rawDirection) ? 'INCOME' : debit > 0 || /chi|expense|debit|ghi no|ghi nợ|dr\b/.test(rawDirection) ? 'EXPENSE' : '';
-    const fingerprint = `${date}|${amount}|${description.toLocaleLowerCase('vi')}`;
-    const duplicate = Boolean(reference && seenReferences.has(reference)) || seenFingerprints.has(fingerprint);
-    if (reference) seenReferences.add(reference); seenFingerprints.add(fingerprint);
-    const candidate = { rowNumber: index + 2, date, description, amount, direction, externalReference: reference, classification: 'UNCLASSIFIED', status: 'NEEDS_REVIEW', duplicate, workshopId: wid, errors: [!date ? 'Thiếu ngày giao dịch hoặc định dạng ngày chưa hỗ trợ' : '', !description ? 'Thiếu nội dung' : '', !(amount > 0) ? 'Số tiền không hợp lệ' : '', !direction ? 'Không xác định được chiều thu/chi' : ''].filter(Boolean) };
+    const direction = bothSidesPositive
+      ? ''
+      : (Number.isFinite(credit) && credit > 0) || /thu|income|credit|ghi co|ghi có|cr\b/.test(rawDirection)
+        ? 'INCOME'
+        : (Number.isFinite(debit) && debit > 0) || /chi|expense|debit|ghi no|ghi nợ|dr\b/.test(rawDirection)
+          ? 'EXPENSE'
+          : '';
+    const errors = [
+      !date ? 'Thiếu ngày giao dịch hoặc định dạng ngày chưa hỗ trợ' : '',
+      !description ? 'Thiếu nội dung' : '',
+      bothSidesPositive ? 'Dòng có cả tiền vào và tiền ra cùng lớn hơn 0; cần tách hoặc sửa trước khi nhập' : '',
+      negativeAmount || Number.isNaN(credit) || Number.isNaN(debit) || !Number.isFinite(amount) || !(amount > 0) ? (bothSidesPositive ? '' : 'Số tiền không hợp lệ') : '',
+      !direction ? (bothSidesPositive ? '' : 'Không xác định được chiều thu/chi') : '',
+    ].filter(Boolean);
+    const key = importRowDuplicateKey({ direction, externalReference: reference, date, amount, description });
+    const duplicate = !errors.length && seenKeys.has(key);
+    if (!errors.length) seenKeys.add(key);
+    const candidate = { rowNumber: index + 2, date, description, amount: Number.isFinite(amount) ? amount : 0, direction, externalReference: reference, classification: 'UNCLASSIFIED', status: 'NEEDS_REVIEW', duplicate, workshopId: wid, errors };
     rows.push(await classifyWithRules(candidate, wid));
   }
   const importId = randomUUID();
-  await getPool().query('INSERT INTO imports (id, workshop_id, actor_id, original_name, preview_data) VALUES (?,?,?,?,?)', [importId, wid, req.user.id, req.file.originalname, JSON.stringify(rows)]);
+  await getPool().query('INSERT INTO imports (id, workshop_id, actor_id, original_name, preview_data, status) VALUES (?,?,?,?,?,?)', [importId, wid, req.user.id, req.file.originalname, JSON.stringify(rows), 'PENDING']);
   res.json({ importId, fileName: req.file.originalname, total: rows.length, duplicateCount: rows.filter((row) => row.duplicate).length, errorCount: rows.filter((row) => row.errors.length).length, rows: rows.slice(0, 100) });
 });
 app.post('/api/import/transactions/:importId/commit', requireAuth, async (req, res) => {
   if (req.user.role === 'WORKSHOP' || !canEntity(req.user, 'transactions') || !canAct(req, 'create')) return res.status(403).json({ error: 'Không đủ quyền import sao kê.' });
   const wid = req.user.workshopId || DEFAULT_WORKSHOP_ID;
-  const [imports] = await getPool().query('SELECT preview_data FROM imports WHERE id = ? AND actor_id = ? AND workshop_id = ?', [req.params.importId, req.user.id, wid]);
-  if (!imports[0]) return res.status(404).json({ error: 'Không tìm thấy phiên import hoặc phiên đã hết hạn.' });
-  const rows = decodeData(imports[0].preview_data);
   const includeDuplicates = Boolean(req.body.includeDuplicates);
   const accountId = String(req.body.accountId || '');
   if (!accountId) return res.status(400).json({ error: 'Chọn tài khoản tiền sẽ nhận các dòng sao kê.' });
-  const connection = await getPool().getConnection(); const inserted = []; let skippedDuplicates = 0; let skippedInvalid = 0;
-  try {
-    await connection.beginTransaction();
-    const account = await getRecord('cash-accounts', accountId, wid, connection);
-    if (!account) { await connection.rollback(); return res.status(404).json({ error: 'Không tìm thấy tài khoản tiền đã chọn.' }); }
-    let current = liveRows(await listRecords('transactions', wid, connection));
+  const outcome = await transaction(wid, async (connection) => {
+    const [imports] = await connection.query('SELECT preview_data, status FROM imports WHERE id = ? AND actor_id = ? AND workshop_id = ? FOR UPDATE', [req.params.importId, req.user.id, wid]);
+    if (!imports[0]) throw businessError('Không tìm thấy phiên import hoặc phiên đã hết hạn.', 404);
+    if (imports[0].status === 'COMMITTED') throw businessError('Phiên import này đã được ghi sổ trước đó.', 409);
+    const rows = decodeData(imports[0].preview_data);
+    const account = await getRecordForUpdate('cash-accounts', accountId, wid, connection);
+    if (!account) throw businessError('Không tìm thấy tài khoản tiền đã chọn.', 404);
+    if (!active(account) || account.status === 'INACTIVE') throw businessError('Tài khoản tiền đã ngừng sử dụng; không thể nhập sao kê.', 409);
+    const currentInAccount = liveRows(await listRecords('transactions', wid, connection)).filter((item) => item.accountId === account.id);
+    const seenKeys = new Set(currentInAccount.map((item) => importRowDuplicateKey(item)));
+    const inserted = [];
+    let skippedDuplicates = 0;
+    let skippedInvalid = 0;
     for (const row of rows) {
-      if (row.errors.length) { skippedInvalid += 1; continue; }
-      const duplicate = Boolean(row.externalReference && current.some((item) => item.externalReference === row.externalReference)) || current.some((item) => item.date === row.date && Number(item.amount) === Number(row.amount) && String(item.description || '').trim().toLocaleLowerCase('vi') === row.description.toLocaleLowerCase('vi'));
+      if (row.errors?.length) { skippedInvalid += 1; continue; }
+      const key = importRowDuplicateKey(row);
+      const duplicate = seenKeys.has(key);
       if (duplicate && !includeDuplicates) { skippedDuplicates += 1; continue; }
+      seenKeys.add(key);
       const value = { ...row, id: randomUUID(), source: 'IMPORT', accountId, accountName: account.name, importedAt: new Date().toISOString(), duplicate: false, workshopId: wid };
       const savedRow = await saveRecord('transactions', value, req.user.id, wid, 'LOCAL_DEMO', connection);
-      inserted.push(savedRow); current.push(savedRow);
+      inserted.push(savedRow);
       await updateCashAccount(connection, req.user.id, { accountId, delta: row.direction === 'INCOME' ? row.amount : -row.amount }, wid);
     }
-    await connection.query('DELETE FROM imports WHERE id = ? AND workshop_id = ?', [req.params.importId, wid]);
+    const resultPayload = { createdCount: inserted.length, skippedDuplicates, skippedInvalid, records: inserted };
+    await connection.query('UPDATE imports SET status = ?, result_data = CAST(? AS JSON) WHERE id = ? AND workshop_id = ?', ['COMMITTED', JSON.stringify({ createdCount: inserted.length, skippedDuplicates, skippedInvalid, accountId }), req.params.importId, wid]);
     if (inserted.some((item) => item.classification === 'UNCLASSIFIED')) {
       await saveRecord('alerts', { type: 'MEDIUM', title: 'Giao dịch sao kê cần phân loại', description: `${inserted.filter((item) => item.classification === 'UNCLASSIFIED').length} dòng import đang chờ người dùng rà soát.`, reference: req.params.importId, status: 'OPEN', createdAt: new Date().toISOString(), workshopId: wid }, req.user.id, wid, 'LOCAL_DEMO', connection);
     }
-    await connection.commit();
-  } catch (error) { await connection.rollback(); throw error; }
-  finally { connection.release(); }
-  await createAudit({ actor: auditActor(req.user), action: 'STATEMENT_IMPORTED', entity: 'transactions', workshopId: wid, afterData: { createdCount: inserted.length, skippedDuplicates, skippedInvalid, accountId, workshopId: wid } });
-  res.json({ createdCount: inserted.length, skippedDuplicates, skippedInvalid, records: inserted });
+    await createAudit({ actor: auditActor(req.user), action: 'STATEMENT_IMPORTED', entity: 'transactions', workshopId: wid, afterData: { createdCount: inserted.length, skippedDuplicates, skippedInvalid, accountId, workshopId: wid }, executor: connection });
+    return resultPayload;
+  });
+  res.json(outcome);
 });
 
 app.post('/api/files', requireAuth, upload.single('file'), async (req, res) => {

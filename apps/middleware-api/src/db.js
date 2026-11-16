@@ -1,6 +1,6 @@
 import pg from 'pg';
 import { randomUUID } from 'node:crypto';
-import { businessError } from './accounting.js';
+import { active, assertCalendarDate, businessError } from './accounting.js';
 
 const revisions = new Map();
 export const recordRevision = (wid) => revisions.get(wid) || 0;
@@ -152,6 +152,7 @@ export async function initDb() {
 
   await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS approval_status VARCHAR(32) NOT NULL DEFAULT 'APPROVED'");
   await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS odoo_sync_status VARCHAR(32) NOT NULL DEFAULT 'PENDING_SYNC'");
+  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INT NOT NULL DEFAULT 1');
 
   // 3. Records table (with workshop_id)
   await pool.query(`CREATE TABLE IF NOT EXISTS records (
@@ -213,6 +214,8 @@ export async function initDb() {
   )`);
   await pool.query(`ALTER TABLE imports ADD COLUMN IF NOT EXISTS workshop_id VARCHAR(36) DEFAULT '${DEFAULT_WORKSHOP_ID}'`);
   await pool.query(`UPDATE imports SET workshop_id = '${DEFAULT_WORKSHOP_ID}' WHERE workshop_id IS NULL`);
+  await pool.query("ALTER TABLE imports ADD COLUMN IF NOT EXISTS status VARCHAR(32) NOT NULL DEFAULT 'PENDING'");
+  await pool.query('ALTER TABLE imports ADD COLUMN IF NOT EXISTS result_data JSONB NULL');
 
   // 6. File assets table (with workshop_id)
   await pool.query(`CREATE TABLE IF NOT EXISTS file_assets (
@@ -292,9 +295,9 @@ export async function createWorkshop({ id = randomUUID(), name, code, taxId = nu
   return { id, name: name.trim(), code: generatedCode, taxId, ownerId };
 }
 
-export async function getWorkshop(id) {
+export async function getWorkshop(id, executor = getPool()) {
   const wid = id || DEFAULT_WORKSHOP_ID;
-  const [rows] = await getPool().query('SELECT id, name, code, tax_id, owner_id, active, settings, created_at FROM workshops WHERE id = ? LIMIT 1', [wid]);
+  const [rows] = await executor.query('SELECT id, name, code, tax_id, owner_id, active, settings, created_at FROM workshops WHERE id = ? LIMIT 1', [wid]);
   return rows[0] || null;
 }
 
@@ -347,6 +350,13 @@ export async function getRecordForUpdate(entity, id, workshopIdOrExecutor, maybe
   return rows[0] ? { ...decodeData(rows[0].data), id: rows[0].record_id, syncStatus: rows[0].sync_status } : null;
 }
 
+export function recordBusinessKey(entity, value) {
+  const code = String(value.code || '').trim().toUpperCase();
+  if (entity !== 'invoices') return code;
+  const party = value.counterpartyId || value.taxCode || String(value.counterparty || '').trim().toUpperCase();
+  return `${value.direction || value.type}:${party}:${String(value.series || '').trim().toUpperCase()}:${code}`;
+}
+
 export async function saveRecord(entity, data, actorId, ...rest) {
   let wid = data.workshopId || null;
   let syncStatus = 'LOCAL_DEMO';
@@ -377,6 +387,10 @@ export async function saveRecord(entity, data, actorId, ...rest) {
     finally { connection.release(); }
   }
   await executor.query('SELECT pg_advisory_xact_lock(hashtext(?))', [`period:${wid}`]);
+  if (data.date !== undefined && data.date !== null && String(data.date).trim() !== '') assertCalendarDate(String(data.date), 'Ngày chứng từ', true);
+  if (data.issueDate !== undefined && data.issueDate !== null && String(data.issueDate).trim() !== '') assertCalendarDate(String(data.issueDate), 'Ngày phát hành', true);
+  if (data.dueDate !== undefined && data.dueDate !== null && String(data.dueDate).trim() !== '') assertCalendarDate(String(data.dueDate), 'Hạn thanh toán', true);
+  if (data.validUntil !== undefined && data.validUntil !== null && String(data.validUntil).trim() !== '') assertCalendarDate(String(data.validUntil), 'Ngày hiệu lực', true);
   if (datedEntities.has(entity)) {
     const before = data.id ? await getRecord(entity, data.id, wid, executor) : null;
     await assertOpenPeriod(data, wid, executor);
@@ -386,18 +400,22 @@ export async function saveRecord(entity, data, actorId, ...rest) {
   const id = data.id || randomUUID();
   const value = { ...data, id, workshopId: wid };
   const keyed = new Set(['invoices','quotations','customers','suppliers','materials','products','boms','production-orders','cash-accounts']);
-  if (keyed.has(entity) && String(value.code || '').trim()) {
-    const code = String(value.code).trim().toUpperCase();
-    const party = value.counterpartyId || value.taxCode || String(value.counterparty || '').trim().toUpperCase();
-    const key = entity === 'invoices' ? `${value.direction || value.type}:${party}:${value.series || ''}:${code}` : code;
-    // Reserve inside the document transaction. The unique database key also protects concurrent requests.
-    const [prior] = await executor.query('SELECT record_id FROM record_business_keys WHERE workshop_id = ? AND entity = ? AND business_key = ?', [wid, entity, key]);
-    if (prior[0] && prior[0].record_id !== id) throw businessError('Mã đã tồn tại trong doanh nghiệp.', 409);
-    const [legacy] = await executor.query('SELECT record_id, data FROM records WHERE workshop_id = ? AND entity = ? AND record_id <> ? AND UPPER(TRIM(data->>\'code\')) = ?', [wid, entity, id, code]);
-    if (legacy.some(row => entity !== 'invoices' || (() => { const other = decodeData(row.data); return (other.direction || other.type) === (value.direction || value.type) && (other.counterpartyId || other.taxCode || String(other.counterparty || '').trim().toUpperCase()) === party && (other.series || '') === (value.series || ''); })())) throw businessError('Mã đã tồn tại trong doanh nghiệp.', 409);
-    await executor.query('INSERT INTO record_business_keys (workshop_id, entity, business_key, record_id) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING', [wid, entity, key, id]);
-    const [reserved] = await executor.query('SELECT record_id FROM record_business_keys WHERE workshop_id = ? AND entity = ? AND business_key = ?', [wid, entity, key]);
-    if (reserved[0]?.record_id !== id) throw businessError('Yêu cầu trùng chứng từ; tải lại danh sách.', 409);
+  if (keyed.has(entity)) {
+    if (!active(value)) {
+      await executor.query('DELETE FROM record_business_keys WHERE workshop_id = ? AND entity = ? AND record_id = ?', [wid, entity, id]);
+    } else if (String(value.code || '').trim()) {
+      const code = String(value.code).trim().toUpperCase();
+      const key = recordBusinessKey(entity, value);
+      // Reserve inside the document transaction. The unique database key also protects concurrent requests.
+      const [prior] = await executor.query('SELECT record_id FROM record_business_keys WHERE workshop_id = ? AND entity = ? AND business_key = ?', [wid, entity, key]);
+      if (prior[0] && prior[0].record_id !== id) throw businessError('Mã đã tồn tại trong doanh nghiệp.', 409);
+      const [legacy] = await executor.query('SELECT record_id, data FROM records WHERE workshop_id = ? AND entity = ? AND record_id <> ? AND UPPER(TRIM(data->>\'code\')) = ?', [wid, entity, id, code]);
+      if (legacy.some(row => { const other = decodeData(row.data); return active(other) && (entity !== 'invoices' || recordBusinessKey('invoices', other) === key); })) throw businessError('Mã đã tồn tại trong doanh nghiệp.', 409);
+      await executor.query('DELETE FROM record_business_keys WHERE workshop_id = ? AND entity = ? AND record_id = ? AND business_key <> ?', [wid, entity, id, key]);
+      await executor.query('INSERT INTO record_business_keys (workshop_id, entity, business_key, record_id) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING', [wid, entity, key, id]);
+      const [reserved] = await executor.query('SELECT record_id FROM record_business_keys WHERE workshop_id = ? AND entity = ? AND business_key = ?', [wid, entity, key]);
+      if (reserved[0]?.record_id !== id) throw businessError('Yêu cầu trùng chứng từ; tải lại danh sách.', 409);
+    }
   }
   const syncable = odooSyncEntities.includes(entity);
   const shouldSync = syncable && hasOdooConfig() && syncStatus !== 'DEMO_SEED';
@@ -446,7 +464,11 @@ export async function ensureUuidRecordId(entity, data, actorId, workshopId, stat
 }
 
 export async function assertOpenPeriod(record, wid, executor = getPool()) {
-  const date = String(record.date || record.issueDate || record.startDate || record.createdAt || new Date().toISOString()).slice(0, 10);
+  const explicitDate = record.date || record.issueDate || record.startDate;
+  if (explicitDate !== undefined && explicitDate !== null && String(explicitDate).trim() !== '') {
+    assertCalendarDate(String(explicitDate), 'Ngày chứng từ', true);
+  }
+  const date = String(explicitDate || record.createdAt || new Date().toISOString()).slice(0, 10);
   const [periods] = await executor.query("SELECT data FROM records WHERE workshop_id = ? AND entity = 'tax-periods' AND data->>'status' = 'LOCKED'", [wid]);
   if (record.periodStatus === 'LOCKED' || periods.some(({ data }) => { const p = decodeData(data); return p.startDate <= date && p.endDate >= date; })) {
     throw businessError('Chứng từ thuộc kỳ đã khóa. Chủ xưởng phải mở khóa kỳ và nhập lý do trước khi thay đổi.', 409);

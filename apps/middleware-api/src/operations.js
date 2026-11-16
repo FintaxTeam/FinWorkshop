@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { getPool, getRecord, getRecordForUpdate, listRecords, saveRecord, createAudit, assertOpenPeriod } from './db.js';
-import { active, businessDate, businessError, money, number } from './accounting.js';
+import { active, assertCalendarDate, businessDate, businessError, money, number } from './accounting.js';
 import { normalizeInvoice, transaction } from './workflows.js';
 
 const nonnegative = (value, label) => {
@@ -18,7 +18,7 @@ export function operationalView(entity, row, role) {
 }
 const audit = (actor, action, entity, before, after, connection, reason) => createAudit({ actor, action, entity, recordId: after.id, beforeData: before, afterData: after, reason, executor: connection });
 
-export async function validateMaster(entity, data, before, actor) {
+export async function validateMaster(entity, data, before, actor, executor = getPool()) {
   const value = { ...data };
   const masters = ['customers', 'suppliers', 'materials', 'products', 'cash-accounts','branches'];
   if (!masters.includes(entity)) return value;
@@ -34,7 +34,7 @@ export async function validateMaster(entity, data, before, actor) {
     for (const key of ['price', 'cost', 'unitCost', 'minStock']) if (value[key] !== undefined) value[key] = nonnegative(value[key], 'Đơn giá / tồn tối thiểu');
     if (!before && number(value.stock) !== 0) throw businessError('Khai báo tồn đầu kỳ bằng phiếu “Tồn đầu kỳ” tại Kho.');
     if (before && (number(value.stock) !== number(before.stock) || value.stockValue !== undefined && number(value.stockValue) !== number(before.stockValue))) throw businessError('Tồn kho chỉ thay đổi qua phiếu nhập, xuất hoặc kiểm kê.', 409);
-    if (before && value.trackInventory !== (before.trackInventory !== false) && (number(before.stock) || (await listRecords('stock-movements', actor.workshopId)).some(row => active(row) && (row.materialId === before.id || row.productId === before.id)))) throw businessError('Mặt hàng đã có tồn/phiếu kho; không đổi phương thức quản lý tồn.', 409);
+    if (before && value.trackInventory !== (before.trackInventory !== false) && (number(before.stock) || (await listRecords('stock-movements', actor.workshopId, executor)).some(row => active(row) && (row.materialId === before.id || row.productId === before.id)))) throw businessError('Mặt hàng đã có tồn/phiếu kho; không đổi phương thức quản lý tồn.', 409);
     value.stock = number(before?.stock); value.stockValue = number(before?.stockValue ?? number(before?.stock) * number(before?.unitCost));
   }
   if (['customers', 'suppliers'].includes(entity)) {
@@ -45,15 +45,36 @@ export async function validateMaster(entity, data, before, actor) {
     if (value.taxCode && !/^\d{10}(?:-?\d{3})?$/.test(String(value.taxCode).trim())) throw businessError('Mã số thuế gồm 10 hoặc 13 chữ số.');
     if (value.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.email)) throw businessError('Email đối tác chưa hợp lệ.');
   }
+  if (entity === 'cash-accounts') {
+    if (value.openingBalance !== undefined) value.openingBalance = nonnegative(value.openingBalance, 'Số dư đầu kỳ');
+    if (!before) {
+      if (Object.hasOwn(data, 'balance') && number(data.balance) !== number(data.openingBalance ?? 0)) {
+        throw businessError('Số dư tài khoản chỉ được thiết lập qua số dư đầu kỳ hoặc giao dịch thu/chi.', 400);
+      }
+    } else {
+      const priorOpening = number(before.openingBalance ?? before.balance);
+      const nextOpening = value.openingBalance !== undefined ? number(value.openingBalance) : priorOpening;
+      if (Object.hasOwn(data, 'balance') && number(data.balance) !== number(before.balance) && nextOpening === priorOpening) {
+        throw businessError('Số dư tài khoản chỉ thay đổi qua giao dịch thu/chi hoặc cập nhật số dư đầu kỳ.', 409);
+      }
+      value.openingBalance = nextOpening;
+      value.balance = Math.round(number(before.balance) + nextOpening - priorOpening);
+    }
+  }
   return value;
 }
 
-export async function normalizeBom(data, wid) {
+export async function normalizeBom(data, wid, executor = getPool()) {
   const value = { ...data };
+  if (value.productId) {
+    const product = await getRecord('products', value.productId, wid, executor);
+    if (!product || !active(product) || (value.status !== 'INACTIVE' && product.status === 'INACTIVE')) throw businessError('Sản phẩm không tồn tại hoặc đã ngừng hoạt động.');
+    value.productName = value.productName || product.name;
+  }
   if (!String(value.productName || value.name || '').trim()) throw businessError('Chọn sản phẩm cho định mức.');
   if (!Array.isArray(value.items) || !value.items.length) throw businessError('Định mức cần ít nhất một dòng vật tư.');
   value.items = await Promise.all(value.items.map(async row => {
-    const material = await getRecord('materials', row.materialId, wid);
+    const material = await getRecord('materials', row.materialId, wid, executor);
     if (!material || !active(material) || material.status==='INACTIVE' || material.trackInventory === false) throw businessError('Chọn vật tư đang quản lý tồn kho.');
     const quantity = nonnegative(row.quantity, 'Định lượng');
     if (!quantity) throw businessError('Định lượng vật tư phải lớn hơn 0.');
@@ -69,17 +90,32 @@ export async function normalizeBom(data, wid) {
   }
   value.version = Math.max(1, Math.trunc(number(value.version) || 1));
   value.status = value.status || 'ACTIVE';
+  if (!['ACTIVE', 'INACTIVE'].includes(value.status)) throw businessError('Trạng thái công thức làm không hợp lệ.');
   return value;
 }
 
-export async function normalizeQuotation(data, wid, patch = data) {
+export async function normalizeQuotation(data, wid, patch = data, executor = getPool()) {
   let value = { ...data };
+  if (value.productId) {
+    const product = await getRecord('products', value.productId, wid, executor);
+    if (!product || !active(product) || product.status === 'INACTIVE') throw businessError('Sản phẩm không tồn tại hoặc đã ngừng hoạt động.');
+  }
   if (value.bomId) {
-    const bom = await getRecord('boms', value.bomId, wid);
-    if (!bom || !active(bom)) throw businessError('Định mức không tồn tại hoặc đã ngừng dùng.');
+    const bom = await getRecord('boms', value.bomId, wid, executor);
+    if (!bom || !active(bom) || bom.status === 'INACTIVE') throw businessError('Định mức không tồn tại hoặc đã ngừng dùng.');
+    if (value.productId && bom.productId && value.productId !== bom.productId) throw businessError('Công thức làm (BOM) không thuộc sản phẩm đã chọn.');
     if (!value.bom || patch.bomId !== undefined) value.bom = structuredClone(bom);
     for (const key of ['materialCost','laborHours','laborRate','machineCost','wasteRate','marginRate']) if (patch[key] === undefined) value[key] = value.bom[key];
     value.productId ||= bom.productId;
+  } else if (Object.hasOwn(patch, 'bomId')) {
+    value.bomId = '';
+    delete value.bom;
+    if (patch !== data) {
+      for (const key of ['materialCost','laborHours','laborRate','machineCost','wasteRate','marginRate']) {
+        if (!Object.hasOwn(patch, key)) value[key] = 0;
+      }
+      if (!Object.hasOwn(patch, 'unitPrice')) value.unitPrice = 0;
+    }
   }
   value.title = String(value.title || '').trim();
   value.customerName = String(value.customerName || '').trim();
@@ -96,15 +132,16 @@ export async function normalizeQuotation(data, wid, patch = data) {
   const lineChanged = ['quantity','unitPrice','title','taxRate','taxRuleId','productId'].some(key => Object.hasOwn(patch, key));
   if (!value.items?.length || lineChanged && !Object.hasOwn(patch, 'items')) value.items = [{ productId: value.productId || undefined, name: value.title, unit: value.unit || 'sản phẩm', quantity, unitPrice: value.unitPrice, taxRuleId: value.taxRuleId || '', taxRate: number(value.taxRate) }];
   delete value.total; delete value.totalAmount; delete value.subtotal; delete value.taxAmount;
-  return normalizeInvoice({ ...value, direction: 'OUTPUT', type: 'OUTPUT', taxRate: number(value.taxRate) }, wid);
+  return normalizeInvoice({ ...value, direction: 'OUTPUT', type: 'OUTPUT', taxRate: number(value.taxRate) }, wid, executor);
 }
 
 export async function createOpeningBalance(data, actor) {
   if (actor.role !== 'OWNER') throw businessError('Chủ doanh nghiệp khai báo số dư đầu kỳ.', 403);
   const entity = data.partnerType === 'CUSTOMER' ? 'customers' : data.partnerType === 'SUPPLIER' ? 'suppliers' : '';
   if (!entity) throw businessError('Chọn khách hàng hoặc nhà cung cấp.');
-  const amount = money(data.amount, 'Công nợ đầu kỳ'), date = String(data.date || ''), reason = String(data.reason || '').trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !reason) throw businessError('Nhập ngày đầu kỳ và căn cứ số dư.');
+  const amount = money(data.amount, 'Công nợ đầu kỳ'), reason = String(data.reason || '').trim();
+  const date = assertCalendarDate(data.date, 'Ngày đầu kỳ', true);
+  if (!reason) throw businessError('Nhập ngày đầu kỳ và căn cứ số dư.');
   return transaction(actor.workshopId, async connection => {
     const partner = await getRecordForUpdate(entity, data.partnerId, actor.workshopId, connection);
     if (!partner || !active(partner)) throw businessError('Đối tác không tồn tại.');
@@ -124,7 +161,9 @@ async function applyStock(connection, data, actor, internal = false) {
   const supported = ['OPENING','RECEIPT','ISSUE','RETURN','WASTE','ADJUST_IN','ADJUST_OUT','FINISHED_RECEIPT','DELIVERY','RETURN_PURCHASE'];
   if (!supported.includes(type)) throw businessError('Loại phiếu kho không hợp lệ.');
   if (type === 'FINISHED_RECEIPT' && !internal) throw businessError('Nhập thành phẩm từ thao tác nghiệm thu lệnh sản xuất.');
+  if (!internal && ['CANCELLED', 'VOID', 'UNALLOCATED', 'DEMO_ARCHIVED'].includes(String(data.status || ''))) throw businessError('Không tạo phiếu kho với trạng thái đã hủy.');
   if (['OPENING','ADJUST_IN','ADJUST_OUT'].includes(type) && actor.role !== 'OWNER') throw businessError('Chủ doanh nghiệp duyệt tồn đầu kỳ và điều chỉnh kiểm kê.', 403);
+  const movementDate = assertCalendarDate(data.date || businessDate(), 'Ngày phiếu kho', true);
   const itemEntity = data.itemEntity === 'products' || data.productId ? 'products' : 'materials';
   const id = data.productId || data.materialId;
   const material = id ? await getRecordForUpdate(itemEntity, id, wid, connection) : (await listRecords(itemEntity, wid, connection)).find(row => row.name === data.materialName);
@@ -134,14 +173,14 @@ async function applyStock(connection, data, actor, internal = false) {
   if (!quantity) throw businessError('Số lượng phải lớn hơn 0.');
   const movements = (await listRecords('stock-movements', wid, connection)).filter(active);
   const same = row => (row.productId || row.materialId) === item.id;
-  if (movements.some(row => same(row) && row.date > (data.date || businessDate()))) throw businessError('Mặt hàng đã có phát sinh sau ngày này. Ghi điều chỉnh ở ngày hiện tại để giữ đúng giá vốn.',409);
+  if (movements.some(row => same(row) && row.date > movementDate)) throw businessError('Mặt hàng đã có phát sinh sau ngày này. Ghi điều chỉnh ở ngày hiện tại để giữ đúng giá vốn.',409);
   const job = data.productionOrderId ? await getRecordForUpdate('production-orders', data.productionOrderId, wid, connection) : null;
   if (actor.role === 'WORKSHOP' && (!job || !['ISSUE','RETURN','WASTE'].includes(type) || ![actor.id, actor.name].includes(job.assignedTo))) throw businessError('Chỉ ghi vật tư cho lệnh được phân công.', 403);
   if (data.productionOrderId && (!job || !active(job) || ['COMPLETED','READY_FOR_RECEIPT'].includes(job.status))) throw businessError('Lệnh không còn nhận phát sinh vật tư.', 409);
   if (['ISSUE','WASTE'].includes(type) && !job) throw businessError('Chọn lệnh sản xuất nhận vật tư.');
   if (type === 'OPENING' && (number(item.stock) || movements.some(same))) throw businessError('Mặt hàng đã có tồn hoặc phát sinh; dùng kiểm kê điều chỉnh.', 409);
   if (['OPENING','ADJUST_IN','ADJUST_OUT'].includes(type) && !String(data.reason || data.note || '').trim()) throw businessError('Nhập căn cứ số dư hoặc lý do kiểm kê.');
-  let unitCost = number(item.unitCost ?? item.cost), sourceIssueId = data.sourceIssueId || data.issueId;
+  let unitCost = number(item.unitCost ?? item.cost), sourceIssueId = data.sourceIssueId || data.issueId, returnAmount = null;
   if (type === 'RETURN') {
     let source = movements.find(row => row.id === sourceIssueId && row.type === 'ISSUE' && same(row));
     if (!source && !sourceIssueId && job) {
@@ -149,9 +188,19 @@ async function applyStock(connection, data, actor, internal = false) {
       if (candidates.length === 1) source = candidates[0];
     }
     if (!source || source.productionOrderId !== data.productionOrderId) throw businessError('Chọn phiếu xuất gốc của vật tư/lệnh cần trả.');
-    const returned = movements.filter(row => row.type === 'RETURN' && row.sourceIssueId === source.id).reduce((sum, row) => sum + number(row.quantity), 0);
+    const priorReturns = movements.filter(row => row.type === 'RETURN' && row.sourceIssueId === source.id);
+    const returned = priorReturns.reduce((sum, row) => sum + number(row.quantity), 0);
     if (quantity + returned > number(source.quantity)) throw businessError('Số trả vượt số đã xuất còn lại.', 409);
-    sourceIssueId = source.id; unitCost = number(source.amount ?? number(source.quantity)*number(source.unitCost))/number(source.quantity);
+    sourceIssueId = source.id;
+    const sourceAmt = number(source.amount ?? number(source.quantity) * number(source.unitCost));
+    const returnedAmt = priorReturns.reduce((sum, row) => sum + number(row.amount ?? number(row.quantity) * number(row.unitCost)), 0);
+    if (Math.abs(quantity + returned - number(source.quantity)) < 1e-8) {
+      returnAmount = Math.max(0, sourceAmt - returnedAmt);
+      unitCost = quantity > 0 ? Math.round(returnAmount / quantity) : 0;
+    } else {
+      unitCost = sourceAmt / number(source.quantity);
+      returnAmount = Math.min(Math.max(0, sourceAmt - returnedAmt), Math.round(quantity * unitCost));
+    }
   }
   let invoice = null, invoiceLineIndex = Number(data.invoiceLineIndex ?? 0);
   if (data.invoiceId) {
@@ -166,14 +215,31 @@ async function applyStock(connection, data, actor, internal = false) {
   if (type === 'DELIVERY' && (!invoice || itemEntity !== 'products')) throw businessError('Xuất bán thành phẩm cần hóa đơn bán ra có đúng mặt hàng.');
   if (type === 'RETURN_PURCHASE') throw businessError('Dùng phiếu xuất điều chỉnh có chứng từ mua điều chỉnh; không tự giảm công nợ từ phiếu kho.');
   if (['OPENING','RECEIPT','ADJUST_IN','FINISHED_RECEIPT'].includes(type) && !invoice) unitCost = money(data.unitCost ?? unitCost, 'Đơn giá nhập');
+  const currentStock = number(item.stock);
   const delta = (incomingStock(type) ? 1 : -1) * quantity;
-  if (number(item.stock) + delta < -1e-8) throw businessError('Tồn kho không đủ.', 409);
-  const oldValue = number(item.stockValue ?? number(item.stock) * number(item.unitCost ?? item.cost));
-  const amount = internal && data.receiptValue !== undefined ? money(data.receiptValue,'Giá trị nhập thành phẩm') : !incomingStock(type) && quantity === number(item.stock) ? oldValue : Math.round(quantity * unitCost);
-  const stockValue = oldValue + (incomingStock(type) ? amount : -amount), stock = number(item.stock) + delta;
+  if (currentStock + delta < -1e-8) throw businessError('Tồn kho không đủ.', 409);
+  const oldValue = number(item.stockValue ?? currentStock * number(item.unitCost ?? item.cost));
+  let amount;
+  if (internal && data.receiptValue !== undefined) {
+    amount = money(data.receiptValue, 'Giá trị nhập thành phẩm');
+  } else if (type === 'RETURN' && returnAmount !== null) {
+    amount = returnAmount;
+  } else if (!incomingStock(type)) {
+    if (Math.abs(quantity - currentStock) < 1e-8 || quantity >= currentStock) {
+      amount = oldValue;
+    } else {
+      amount = currentStock > 0 ? Math.min(oldValue, Math.max(0, Math.round(quantity * oldValue / currentStock))) : 0;
+    }
+    unitCost = quantity > 0 ? Math.round(amount / quantity) : 0;
+  } else {
+    amount = Math.round(quantity * unitCost);
+  }
+  const stockValue = Math.max(0, oldValue + (incomingStock(type) ? amount : -amount)), stock = currentStock + delta;
   const sequence = Math.max(0,...movements.filter(same).map(row=>number(row.sequence)))+1;
-  const saved = await saveRecord('stock-movements', { ...data, id: randomUUID(), sequence, date: data.date || businessDate(), type, quantity, itemEntity, materialId: itemEntity === 'materials' ? item.id : undefined, productId: itemEntity === 'products' ? item.id : undefined, materialName: item.name, unit: item.unit, unitCost, amount, sourceIssueId, invoiceLineIndex: invoice ? invoiceLineIndex : undefined, status: 'CONFIRMED', stockBefore: number(item.stock), stockAfter: stock, stockValueBefore: oldValue, stockValueAfter: stockValue, reason: data.reason || data.note || '' }, actor.id, wid, connection);
-  await saveRecord(itemEntity, { ...item, stock, stockValue, unitCost: stock ? Math.round(stockValue / stock) : unitCost }, actor.id, wid, connection);
+  const { sourceProductionOrderId: _ignoredSourceJob, receiptValue: _ignoredReceiptValue, sequence: _ignoredSeq, stockBefore: _ignoredSb, stockAfter: _ignoredSa, stockValueBefore: _ignoredSvb, stockValueAfter: _ignoredSva, ...safeData } = data;
+  const saved = await saveRecord('stock-movements', { ...safeData, id: randomUUID(), sequence, date: movementDate, type, quantity, itemEntity, materialId: itemEntity === 'materials' ? item.id : undefined, productId: itemEntity === 'products' ? item.id : undefined, sourceProductionOrderId: internal ? data.sourceProductionOrderId : undefined, materialName: item.name, unit: item.unit, unitCost: Math.round(unitCost), amount, sourceIssueId, invoiceLineIndex: invoice ? invoiceLineIndex : undefined, status: 'CONFIRMED', stockBefore: currentStock, stockAfter: stock, stockValueBefore: oldValue, stockValueAfter: stockValue, reason: data.reason || data.note || '' }, actor.id, wid, connection);
+  const nextUnitCost = incomingStock(type) ? (stock > 0 ? Math.round(stockValue / stock) : Math.round(unitCost)) : number(item.unitCost ?? (stock > 0 ? Math.round(stockValue / stock) : 0));
+  await saveRecord(itemEntity, { ...item, stock, stockValue, unitCost: nextUnitCost }, actor.id, wid, connection);
   await audit(actor, 'STOCK_POSTED', 'stock-movements', null, saved, connection, saved.reason);
   return saved;
 }
@@ -188,6 +254,12 @@ export async function cancelStockMovement(id, actor, reason) {
     const movements = (await listRecords('stock-movements', actor.workshopId, connection)).filter(active);
     if (movements.some(row => row.sourceIssueId === id)) throw businessError('Hủy các phiếu trả tham chiếu trước khi hủy phiếu xuất.', 409);
     if (before.type==='FINISHED_RECEIPT') throw businessError('Phiếu nghiệm thu cần xử lý thành phẩm và mở lại lệnh; không hủy trực tiếp.', 409);
+    if (before.productionOrderId) {
+      const job = await getRecordForUpdate('production-orders', before.productionOrderId, actor.workshopId, connection);
+      if (job && (job.finishedReceiptId || ['COMPLETED', 'READY_FOR_RECEIPT'].includes(job.status))) {
+        throw businessError('Lệnh sản xuất đã kết thúc hoặc đã nghiệm thu thành phẩm; không thể hủy phiếu vật tư của lệnh này.', 409);
+      }
+    }
     const entity = before.itemEntity || (before.productId ? 'products' : 'materials');
     const itemId = before.productId || before.materialId;
     if(!before.sequence)throw businessError('Phiếu cũ chưa có thứ tự định giá; dùng phiếu kiểm kê điều chỉnh có căn cứ.',409);
@@ -203,6 +275,7 @@ export async function cancelStockMovement(id, actor, reason) {
 }
 
 export async function productionAction(id, action, data, actor) {
+  const actionDate = assertCalendarDate(data.actionDate || data.date || businessDate(), 'Ngày thực hiện', true);
   return transaction(actor.workshopId, async connection => {
     const before = await getRecordForUpdate('production-orders', id, actor.workshopId, connection);
     if (!before || !active(before)) throw businessError('Lệnh không tồn tại hoặc đã hủy.', 409);
@@ -223,13 +296,33 @@ export async function productionAction(id, action, data, actor) {
       const labor = (await listRecords('labor-logs', actor.workshopId, connection)).filter(row => active(row) && row.productionOrderId === id);
       const shortage = (before.bom?.items || []).some(item => movements.filter(row => row.materialId === item.materialId).reduce((sum, row) => sum + (row.type === 'RETURN' ? -1 : row.type === 'ISSUE' || row.type === 'WASTE' ? 1 : 0) * number(row.quantity), 0) < number(item.quantity) * number(before.quantity));
       if ((shortage || number(before.plannedLaborHours) > 0 && !labor.length) && !String(data.note || '').trim()) throw businessError('Vật tư/giờ công chưa đủ định mức. Nhập lý do chênh lệch trước khi kết thúc.', 409);
-      after.status = before.productId ? 'READY_FOR_RECEIPT' : 'COMPLETED'; after.progress = 100; after.stage = before.productId ? 'Chờ nghiệm thu thành phẩm' : 'Hoàn thành dịch vụ'; after.completionNote = String(data.note || '');
+      const product = before.productId ? await getRecord('products', before.productId, actor.workshopId, connection) : null;
+      const stockableProduct = Boolean(before.productId && product?.trackInventory !== false);
+      after.status = stockableProduct ? 'READY_FOR_RECEIPT' : 'COMPLETED';
+      after.progress = 100;
+      after.stage = stockableProduct ? 'Chờ nghiệm thu thành phẩm' : 'Hoàn thành dịch vụ';
+      after.completionNote = String(data.note || '');
+      after.completedDate = actionDate;
       after.completedAt = new Date().toISOString();
+      if (!stockableProduct) {
+        const issuedCost = movements.reduce((sum, row) => sum + (row.type === 'RETURN' ? -1 : ['ISSUE', 'WASTE'].includes(row.type) ? 1 : 0) * number(row.amount ?? number(row.quantity) * number(row.unitCost)), 0);
+        const laborCost = labor.reduce((sum, row) => sum + Math.round(number(row.hours) * number(row.hourlyRate)), 0);
+        after.actualMaterialCost = issuedCost;
+        after.actualLaborCost = laborCost;
+        after.totalCost = issuedCost + laborCost;
+        after.serviceCostEvents = [...(before.serviceCostEvents || []), { type: 'COMPLETE', date: actionDate, amount: issuedCost + laborCost }];
+      }
     } else if (action === 'receive-finished') {
       if (!['OWNER','WAREHOUSE','ACCOUNTANT'].includes(actor.role)) throw businessError('Chỉ người nghiệm thu được nhập thành phẩm.', 403);
       if (before.status !== 'READY_FOR_RECEIPT' || !before.productId) throw businessError('Lệnh chưa sẵn sàng nghiệm thu.', 409);
+      if (actor.role === 'WAREHOUSE' && Object.hasOwn(data, 'machineCost') && data.machineCost !== undefined && number(data.machineCost) !== number(before.plannedMachineCost)) {
+        throw businessError('Thủ kho chỉ nghiệm thu số lượng nhập kho, không được điều chỉnh chi phí máy.', 403);
+      }
       const material = (await listRecords('stock-movements', actor.workshopId, connection)).filter(row => active(row) && row.productionOrderId === id);
       const labor = (await listRecords('labor-logs', actor.workshopId, connection)).filter(row => active(row) && row.productionOrderId === id);
+      if (material.some(row => row.date > actionDate) || labor.some(row => row.date > actionDate)) {
+        throw businessError('Ngày nghiệm thu không được trước ngày xuất vật tư hoặc ghi giờ công của lệnh.', 409);
+      }
       const actualMaterialCost = material.reduce((sum, row) => sum + (row.type === 'RETURN' ? -1 : ['ISSUE','WASTE'].includes(row.type) ? 1 : 0) * number(row.amount ?? number(row.quantity) * number(row.unitCost)), 0);
       const actualLaborCost = labor.reduce((sum, row) => sum + Math.round(number(row.hours) * number(row.hourlyRate)), 0);
       const machineCost = money(data.machineCost ?? before.plannedMachineCost, 'Chi phí máy thực tế');
@@ -237,16 +330,26 @@ export async function productionAction(id, action, data, actor) {
       if (number(before.quantity) <= 0 || totalCost < 0) throw businessError('Số lượng/giá thành lệnh không hợp lệ.');
       after.actualMaterialCost = actualMaterialCost; after.actualLaborCost = actualLaborCost; after.actualMachineCost = machineCost; after.totalCost = totalCost; after.unitCost = Math.round(totalCost / number(before.quantity));
       // Mark the job completed in this same transaction before applying its receipt.
-      after.status = 'COMPLETED'; after.stage = 'Đã nghiệm thu'; after.acceptedBy = actor.name; after.acceptedAt = new Date().toISOString();
-      const receipt = await applyStock(connection, { code: `NK-${before.code}`, type: 'FINISHED_RECEIPT', productId: before.productId, quantity: before.quantity, unitCost: after.unitCost, receiptValue:totalCost, date: data.date || businessDate(), productionOrderId: undefined, sourceProductionOrderId: id, note: `Nghiệm thu ${before.code}` }, actor, true);
+      after.status = 'COMPLETED'; after.stage = 'Đã nghiệm thu'; after.acceptedBy = actor.name; after.acceptedDate = actionDate; after.acceptedAt = new Date().toISOString();
+      const receipt = await applyStock(connection, { code: `NK-${before.code}`, type: 'FINISHED_RECEIPT', productId: before.productId, quantity: before.quantity, unitCost: after.unitCost, receiptValue:totalCost, date: actionDate, productionOrderId: undefined, sourceProductionOrderId: id, note: `Nghiệm thu ${before.code}` }, actor, true);
       after.finishedReceiptId = receipt.id;
     } else if (action === 'reopen') {
       if (actor.role !== 'OWNER' || !String(data.note || '').trim()) throw businessError('Chủ doanh nghiệp mở lại lệnh kèm lý do.', 403);
       if (!['COMPLETED','READY_FOR_RECEIPT'].includes(before.status)) throw businessError('Chỉ mở lại lệnh đã kết thúc.', 409);
       if (before.finishedReceiptId) throw businessError('Lệnh đã nhập thành phẩm; cần xử lý thành phẩm và giá thành trước khi mở lại.', 409);
+      const prevCompleteDate = before.completedDate || before.completedAt?.slice(0, 10) || '';
+      if (prevCompleteDate && actionDate < prevCompleteDate) throw businessError('Ngày mở lại lệnh không được trước ngày hoàn thành trước đó.', 409);
+      if (before.status === 'COMPLETED') {
+        const prevEvents = Array.isArray(before.serviceCostEvents) ? before.serviceCostEvents : [];
+        const lastComplete = [...prevEvents].reverse().find(ev => ev.type === 'COMPLETE');
+        const reversalAmount = lastComplete ? number(lastComplete.amount) : number(before.actualMaterialCost || 0) + number(before.actualLaborCost || 0);
+        if (prevEvents.length || reversalAmount > 0 || prevCompleteDate) {
+          after.serviceCostEvents = [...(prevEvents.length ? prevEvents : [{ type: 'COMPLETE', date: prevCompleteDate || actionDate, amount: reversalAmount }]), { type: 'REOPEN', date: actionDate, amount: reversalAmount }];
+        }
+      }
       after.status = 'IN_PROGRESS'; after.progress = Math.min(number(before.progress), 99); after.stage = 'Đã mở lại'; after.reopenReason = String(data.note);
     } else throw businessError('Thao tác sản xuất không hợp lệ.');
-    await assertOpenPeriod({ date: data.date || businessDate() }, actor.workshopId, connection);
+    await assertOpenPeriod({ date: actionDate }, actor.workshopId, connection);
     const saved = await saveRecord('production-orders', after, actor.id, actor.workshopId, connection);
     await audit(actor, `PRODUCTION_${action.toUpperCase()}`, 'production-orders', before, saved, connection, data.note);
     return saved;

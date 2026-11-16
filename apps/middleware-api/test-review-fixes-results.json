@@ -1,8 +1,8 @@
 {
   "base": "http://127.0.0.1:3005/api",
-  "tag": "FIX-1794333778101",
+  "tag": "FIX-1794822421389",
   "date": "2026-10-27",
-  "at": "2026-11-10T18:03:03.534Z",
+  "at": "2026-11-16T09:47:11.924Z",
   "results": [
     {
       "name": "Business registration creates a separate empty workspace and owner can log in offline",
