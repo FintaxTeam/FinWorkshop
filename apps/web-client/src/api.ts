@@ -1,8 +1,11 @@
 import axios from 'axios';
 
 const getBaseUrl = () => {
-  if (typeof window !== 'undefined' && window.location.origin.includes('fintaxauto.space')) {
-    return 'https://bringing-mixing-happening-summaries.trycloudflare.com/api';
+  if (typeof window !== 'undefined') {
+    if (window.location.origin.includes('fintaxauto.space')) {
+      return 'https://bringing-mixing-happening-summaries.trycloudflare.com/api';
+    }
+    return '/api';
   }
   return import.meta.env.VITE_API_URL || '/api';
 };

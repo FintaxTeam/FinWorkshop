@@ -53,7 +53,7 @@ app.use((req, res, next) => {
   if (req.path.startsWith('/api-docs')) return next();
   return helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } })(req, res, next);
 });
-app.use(cors({ origin: process.env.WEB_ORIGIN?.split(',') || ['http://localhost:5173'], credentials: false }));
+app.use(cors({ origin: true, credentials: true }));
 app.use('/api/website', createWebsiteRouter());
 app.use(express.json({ limit: '8mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
