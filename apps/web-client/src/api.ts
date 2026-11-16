@@ -1,6 +1,13 @@
 import axios from 'axios';
 
-const baseURL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+const getBaseUrl = () => {
+  if (typeof window !== 'undefined' && window.location.origin.includes('fintaxauto.space')) {
+    return 'https://bringing-mixing-happening-summaries.trycloudflare.com/api';
+  }
+  return import.meta.env.VITE_API_URL || '/api';
+};
+
+const baseURL = getBaseUrl();
 export const api = axios.create({ baseURL, timeout: 15000 });
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('fintax_token');
