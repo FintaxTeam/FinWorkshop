@@ -3,7 +3,7 @@ import axios from 'axios';
 const getBaseUrl = () => {
   if (typeof window !== 'undefined') {
     if (window.location.origin.includes('fintaxauto.space')) {
-      return 'https://bringing-mixing-happening-summaries.trycloudflare.com/api';
+      return 'https://7c0f84da17afc6.app.lhr.life/api';
     }
     return '/api';
   }
