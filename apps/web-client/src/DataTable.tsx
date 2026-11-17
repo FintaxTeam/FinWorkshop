@@ -1,11 +1,30 @@
-import { useEffect,useMemo,useState,type ReactNode } from 'react';
+import { useEffect,useMemo,useRef,useState,type ReactNode } from 'react';
 import { useLocation } from 'react-router-dom';
 import { Button,EmptyState,SearchBox,StatusBadge } from './components';
 import { exportExcel,type ExportColumn } from './exports';
-import { AlertTriangle,ArrowDownToLine,ArrowUpDown,Filter } from 'lucide-react';
+import { AlertTriangle,ArrowDownToLine,ArrowUpDown,Check,Columns3,Filter,RotateCcw } from 'lucide-react';
 import { actionLabel,displayLabel,entityLabels,formatNumber,formatTaxRate,isMoneyField,plainValue,referenceText,vietnamDate } from './presentation';
 import { formatDate,formatVnd,statusLabel,today } from './api';
 import { useLanguage } from './language';
+
+// Các cột phụ mặc định ẩn khi bảng có từ 7 cột trở lên để vừa khít 1 màn hình không cần kéo ngang
+const SECONDARY_COLUMN_KEYS = new Set([
+  'direction',
+  'subtotal',
+  'taxAmount',
+  'costEstimate',
+  'accountName',
+  'category',
+  'discountAmount',
+  'roundingAdjustment',
+  'bankFeeAmount',
+  'invoiceId',
+  'paymentId',
+  'LegalReference',
+  'legalReference',
+  'effectiveFrom',
+  'effectiveTo',
+]);
 
 export function Pagination({ page, pageSize, total, onPage, onPageSize }: { page: number; pageSize: number; total: number; onPage: (value: number) => void; onPageSize: (value: number) => void }) {
   const { t, isEn } = useLanguage();
@@ -45,6 +64,94 @@ export function DataTable({ title, rows, columns, controls, emptyTitle, emptyHin
   const initialQ = initialParams.get('q') || '';
   const initialStatus = initialParams.get('status') || '';
   const [search, setSearch] = useState(initialQ), [query, setQuery] = useState(initialQ), [status, setStatus] = useState(initialStatus), [type, setType] = useState(''), [page, setPage] = useState(1), [pageSize, setPageSize] = useState(10), [sort, setSort] = useState({ key: '', descending: false });
+  const [colMenuOpen, setColMenuOpen] = useState(false);
+  const colMenuRef = useRef<HTMLDivElement>(null);
+
+  const storageKey = useMemo(() => `fintax_cols_v1_${location.pathname}_${title}`, [location.pathname, title]);
+
+  const computeDefaultVisibleKeys = useMemo(() => {
+    const isWideTable = columns.length >= 7;
+    const defaults = columns
+      .filter((col) => {
+        if (col.defaultHidden !== undefined) return !col.defaultHidden;
+        if (isWideTable && SECONDARY_COLUMN_KEYS.has(col.key)) return false;
+        return true;
+      })
+      .map((col) => col.key);
+    return defaults.length >= 2 ? defaults : columns.map((col) => col.key);
+  }, [columns]);
+
+  const [visibleKeys, setVisibleKeys] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem(storageKey);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          const valid = parsed.filter((k) => columns.some((c) => c.key === k));
+          if (valid.length >= 2) return valid;
+        }
+      }
+    } catch {
+      // ignore storage errors
+    }
+    return computeDefaultVisibleKeys;
+  });
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(storageKey);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          const valid = parsed.filter((k) => columns.some((c) => c.key === k));
+          if (valid.length >= 2) {
+            setVisibleKeys(valid);
+            return;
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+    setVisibleKeys(computeDefaultVisibleKeys);
+  }, [storageKey, computeDefaultVisibleKeys, columns]);
+
+  useEffect(() => {
+    function handleOutsideClick(event: MouseEvent) {
+      if (colMenuRef.current && !colMenuRef.current.contains(event.target as Node)) {
+        setColMenuOpen(false);
+      }
+    }
+    if (colMenuOpen) {
+      document.addEventListener('mousedown', handleOutsideClick);
+      return () => document.removeEventListener('mousedown', handleOutsideClick);
+    }
+  }, [colMenuOpen]);
+
+  const saveVisibleKeys = (next: string[]) => {
+    setVisibleKeys(next);
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(next));
+    } catch {
+      // ignore
+    }
+  };
+
+  const toggleColumn = (key: string) => {
+    if (visibleKeys.includes(key)) {
+      if (visibleKeys.length <= 2) return; // Giữ tối thiểu 2 cột
+      saveVisibleKeys(visibleKeys.filter((k) => k !== key));
+    } else {
+      const ordered = columns.map((c) => c.key).filter((k) => k === key || visibleKeys.includes(k));
+      saveVisibleKeys(ordered);
+    }
+  };
+
+  const visibleColumns = useMemo(
+    () => columns.filter((col) => visibleKeys.includes(col.key)),
+    [columns, visibleKeys]
+  );
+
   useEffect(() => {
     const nextParams = new URLSearchParams(location.search);
     const nextQ = nextParams.get('q') || '';
@@ -88,6 +195,8 @@ export function DataTable({ title, rows, columns, controls, emptyTitle, emptyHin
     return typeof value === 'number' ? exportValue ? value : formatNumber(value) : plainValue(value);
   };
   const download = () => exportExcel(t(title), sorted.map((row) => Object.fromEntries(columns.map((column) => [column.key, display(row,column,true)]))), columns);
+  const hiddenCount = columns.length - visibleColumns.length;
+
   return <div className="rounded-xl border border-slate-200/80 bg-white shadow-soft overflow-hidden">
     <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200/80 px-4 py-3 bg-white">
       <div className="flex w-full flex-wrap items-center gap-2 lg:w-auto">
@@ -102,37 +211,122 @@ export function DataTable({ title, rows, columns, controls, emptyTitle, emptyHin
           {types.map((value) => <option key={value} value={value}>{value === 'PAID' ? (isEn ? 'Payment Voucher' : 'Phiếu chi') : statusLabel(value)}</option>)}
         </select>}
       </div>
-      <Button variant="secondary" compact onClick={download}><ArrowDownToLine size={13}/>{t('Xuất Excel (.xlsx)')}</Button>
+
+      <div className="flex items-center gap-2">
+        {/* Column Visibility Toggle (Chuẩn Odoo 16 & shadcn/ui) */}
+        {columns.length > 3 && (
+          <div ref={colMenuRef} className="relative">
+            <button
+              type="button"
+              onClick={() => setColMenuOpen((v) => !v)}
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-colors ${
+                hiddenCount > 0
+                  ? 'border-brand-200 bg-brand-50/70 text-brand-700 hover:bg-brand-100/70'
+                  : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+              }`}
+              title={isEn ? 'Customize visible columns' : 'Tùy chỉnh ẩn/hiện các cột dữ liệu'}
+            >
+              <Columns3 size={13} className={hiddenCount > 0 ? 'text-brand-600' : 'text-slate-500'} />
+              <span>{isEn ? 'Columns' : 'Cột hiển thị'}</span>
+              <span className="rounded-full bg-white/90 px-1.5 py-0.2 text-[10px] font-bold tabular-nums border border-slate-200/80">
+                {visibleColumns.length}/{columns.length}
+              </span>
+            </button>
+
+            {colMenuOpen && (
+              <div className="absolute right-0 top-full mt-1.5 z-50 w-64 rounded-xl border border-slate-200 bg-white p-2 shadow-xl animate-in fade-in zoom-in-95 duration-100">
+                <div className="flex items-center justify-between border-b border-slate-100 px-2 pb-2 mb-1.5">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                    {isEn ? 'Toggle Columns' : 'Ẩn / Hiện cột'}
+                  </span>
+                  <div className="flex items-center gap-2 text-[11px] font-semibold">
+                    <button
+                      type="button"
+                      onClick={() => saveVisibleKeys(computeDefaultVisibleKeys)}
+                      className="inline-flex items-center gap-0.5 text-slate-500 hover:text-brand-700"
+                      title="Khôi phục bộ cột gọn mặc định"
+                    >
+                      <RotateCcw size={11} />
+                      <span>{isEn ? 'Compact' : 'Mặc định'}</span>
+                    </button>
+                    <span className="text-slate-300">·</span>
+                    <button
+                      type="button"
+                      onClick={() => saveVisibleKeys(columns.map((c) => c.key))}
+                      className="text-brand-600 hover:underline"
+                    >
+                      {isEn ? 'Show all' : 'Hiện tất cả'}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="max-h-64 overflow-y-auto space-y-0.5 pr-0.5">
+                  {columns.map((col) => {
+                    const checked = visibleKeys.includes(col.key);
+                    const disabled = checked && visibleKeys.length <= 2;
+                    return (
+                      <button
+                        key={col.key}
+                        type="button"
+                        disabled={disabled}
+                        onClick={() => toggleColumn(col.key)}
+                        className={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition-colors ${
+                          checked ? 'bg-slate-50 font-semibold text-slate-900' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'
+                        } disabled:opacity-40`}
+                      >
+                        <span className="truncate">{t(col.label)}</span>
+                        <span
+                          className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors ${
+                            checked ? 'border-brand-600 bg-brand-600 text-white' : 'border-slate-300 bg-white'
+                          }`}
+                        >
+                          {checked && <Check size={11} strokeWidth={3} />}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        <Button variant="secondary" compact onClick={download}><ArrowDownToLine size={13}/>{t('Xuất Excel (.xlsx)')}</Button>
+      </div>
     </div>
     {sorted.length ? <div className="overflow-x-auto">
       <table className="w-full text-left text-sm">
         <thead className="border-b border-slate-200/90 bg-slate-50/90">
           <tr>
-            <th className="w-14 whitespace-nowrap px-3.5 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500">{t('STT')}</th>
-            {columns.map((column) => <th key={column.key} className={`whitespace-nowrap px-3.5 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500 ${column.format === 'money' || isMoneyField(column.key) ? 'text-right' : ''}`}>
+            <th className="w-12 whitespace-nowrap px-3 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500">{t('STT')}</th>
+            {visibleColumns.map((column) => <th key={column.key} className={`whitespace-nowrap px-3 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500 ${column.format === 'money' || isMoneyField(column.key) ? 'text-right' : ''}`}>
               <button onClick={() => setSort({ key: column.key, descending: sort.key === column.key ? !sort.descending : false })} className="inline-flex items-center gap-1 hover:text-slate-900 transition-colors">
                 {t(column.label)}
                 <ArrowUpDown size={11} className={sort.key === column.key ? 'text-brand-600' : 'text-slate-300'}/>
               </button>
             </th>)}
-            {controls && <th className="whitespace-nowrap px-3.5 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider text-slate-500">{isEn ? 'Actions' : 'Thao tác'}</th>}
+            {controls && <th className="sticky right-0 z-10 bg-slate-50/95 backdrop-blur-[1px] whitespace-nowrap px-3 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider text-slate-500 shadow-[-4px_0_8px_-4px_rgba(15,23,42,0.06)]">{isEn ? 'Actions' : 'Thao tác'}</th>}
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
-          {sorted.slice((current - 1) * pageSize, current * pageSize).map((row,index) => <tr key={row.id || index} className={`transition-colors ${warning(row) === 'red' ? 'bg-red-50/60 hover:bg-red-50' : warning(row) === 'amber' ? 'bg-amber-50/60 hover:bg-amber-50' : 'hover:bg-slate-50/80'}`}>
-            <td className="px-3.5 py-2.5 text-xs tabular-nums text-slate-400">
-              <span className="flex items-center gap-1.5">
-                {warning(row) && <AlertTriangle size={13} className={warning(row) === 'red' ? 'text-red-600' : 'text-amber-600'} aria-label={warning(row) === 'red' ? (isEn ? 'Urgent action required' : 'Cần xử lý ngay') : (isEn ? 'Review needed' : 'Cần rà soát')}/>}
-                <span>{(current - 1) * pageSize + index + 1}</span>
-              </span>
-            </td>
-            {columns.map((column) => <td key={column.key} className={`max-w-xs px-3.5 py-2.5 text-xs sm:text-[13px] ${column.format === 'money' || isMoneyField(column.key) ? 'whitespace-nowrap text-right font-semibold tabular-nums text-slate-900' : ['code','name','counterparty'].includes(column.key) ? 'font-semibold text-slate-900' : 'text-slate-600'}`}>
-              {display(row,column)}
-            </td>)}
-            {controls && <td className="px-3.5 py-2.5 text-right">
-              <div className="flex min-w-max flex-wrap justify-end gap-1.5">{controls(row)}</div>
-            </td>}
-          </tr>)}
+          {sorted.slice((current - 1) * pageSize, current * pageSize).map((row,index) => {
+            const rowWarn = warning(row);
+            const stickyBg = rowWarn === 'red' ? 'bg-red-50/95 group-hover:bg-red-50' : rowWarn === 'amber' ? 'bg-amber-50/95 group-hover:bg-amber-50' : 'bg-white/95 group-hover:bg-slate-50';
+            return <tr key={row.id || index} className={`group transition-colors ${rowWarn === 'red' ? 'bg-red-50/60 hover:bg-red-50' : rowWarn === 'amber' ? 'bg-amber-50/60 hover:bg-amber-50' : 'hover:bg-slate-50/80'}`}>
+              <td className="px-3 py-2.5 text-xs tabular-nums text-slate-400">
+                <span className="flex items-center gap-1.5">
+                  {rowWarn && <AlertTriangle size={13} className={rowWarn === 'red' ? 'text-red-600' : 'text-amber-600'} aria-label={rowWarn === 'red' ? (isEn ? 'Urgent action required' : 'Cần xử lý ngay') : (isEn ? 'Review needed' : 'Cần rà soát')}/>}
+                  <span>{(current - 1) * pageSize + index + 1}</span>
+                </span>
+              </td>
+              {visibleColumns.map((column) => <td key={column.key} className={`max-w-[220px] truncate px-3 py-2.5 text-xs sm:text-[13px] ${column.format === 'money' || isMoneyField(column.key) ? 'whitespace-nowrap text-right font-semibold tabular-nums text-slate-900' : ['code','name','counterparty'].includes(column.key) ? 'font-semibold text-slate-900' : 'text-slate-600'}`} title={typeof row[column.key] === 'string' ? row[column.key] : undefined}>
+                {display(row,column)}
+              </td>)}
+              {controls && <td className={`sticky right-0 z-10 px-3 py-2 text-right transition-colors shadow-[-4px_0_8px_-4px_rgba(15,23,42,0.06)] ${stickyBg}`}>
+                <div className="flex min-w-max flex-wrap justify-end gap-1">{controls(row)}</div>
+              </td>}
+            </tr>;
+          })}
         </tbody>
       </table>
     </div> : <EmptyState title={query || status || type ? (isEn ? 'No results found' : 'Không tìm thấy kết quả') : emptyTitle ? t(emptyTitle) : t('Chưa có gì ở đây')} description={query || status || type ? (isEn ? 'Try different keywords or clear filters.' : 'Thử tìm từ khóa khác hoặc xóa bộ lọc.') : emptyHint ? t(emptyHint) : t('Bấm nút thêm ở góc trên để bắt đầu.')}/>}

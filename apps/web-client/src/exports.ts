@@ -1,7 +1,7 @@
 import * as XLSX from 'xlsx';
 import { plainValue,displayLabel,vietnamDate } from './presentation';
 
-export type ExportColumn = { key: string; label: string; format?: string };
+export type ExportColumn = { key: string; label: string; format?: string; defaultHidden?: boolean };
 function exportSheet(title: string, rows: Record<string, any>[], columns: ExportColumn[]) {
   const moneyColumns = columns.map((column, index) => column.format === 'money' ? index + 1 : -1).filter((index) => index >= 0);
   const values = [[title], [], ['STT', ...columns.map((column) => column.label)], ...rows.map((row, index) => [index + 1, ...columns.map((column) => {
