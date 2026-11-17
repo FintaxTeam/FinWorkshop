@@ -992,6 +992,14 @@ app.get('/api/:entity', requireAuth, requireEntity, async (req, res) => {
   }
   if (req.user.role === 'WAREHOUSE' && req.params.entity === 'production-orders') rows=rows.map(({laborRate,costEstimate,plannedMachineCost,totalCost,unitCost,...row})=>({...row,bom:row.bom?{...row.bom,items:(row.bom.items||[]).map(({unitCost,amount,...item})=>item),laborRate:undefined,materialCost:undefined,machineCost:undefined}:null}));
   rows=rows.filter(row=>row.status!=='DEMO_ARCHIVED');
+  if (req.params.entity === 'quotations') {
+    rows = rows.filter((row) => {
+      if (row.status !== 'DRAFT') return true;
+      // Bản nháp (DRAFT) của ai thì chỉ người đó nhìn thấy; Chủ xưởng không thấy bản nháp của Kế toán
+      if (row.createdBy) return row.createdBy === req.user.id && req.user.role !== 'OWNER';
+      return req.user.role === 'ACCOUNTANT';
+    });
+  }
   if (req.user.role === 'WAREHOUSE' && req.params.entity === 'stock-movements') rows=rows.map(({unitCost,amount,stockValueBefore,stockValueAfter,...row})=>row);
   if (q) rows = rows.filter((row) => JSON.stringify(row).toLowerCase().includes(q));
   if (status) rows = rows.filter((row) => row.status === status);
@@ -1034,8 +1042,23 @@ app.post('/api/:entity', requireAuth, requireEntity, async (req, res) => {
   }
   if (entity === 'tax-periods' && (req.user.role !== 'OWNER' || value.status === 'LOCKED')) throw businessError('Chỉ Chủ xưởng tạo kỳ mở; dùng thao tác khóa kỳ.', 403);
   if (entity === 'quotations') {
-    value.status = req.user.role === 'OWNER' && req.body?.autoApprove ? 'APPROVED' : 'DRAFT';
-    if (value.status === 'APPROVED') value.approvedAt = new Date().toISOString();
+    const now = new Date().toISOString();
+    value.createdBy = req.user.id;
+    value.createdByName = req.user.name;
+    value.createdByRole = req.user.role;
+    delete value.submitAction;
+    delete value.autoApprove;
+    if (req.user.role === 'OWNER') {
+      value.status = 'APPROVED';
+      value.approvedAt = now;
+      value.approvedBy = req.user.name;
+    } else if (req.body?.submitAction === 'SUBMIT' || req.body?.status === 'PENDING_APPROVAL') {
+      value.status = 'PENDING_APPROVAL';
+      value.submittedAt = now;
+      value.submittedBy = req.user.name;
+    } else {
+      value.status = 'DRAFT';
+    }
     value.version = 1;
   }
   if (entity === 'production-orders') {
@@ -1207,10 +1230,25 @@ app.put('/api/:entity/:id', requireAuth, requireEntity, async (req, res) => {
     if (entity === 'boms') value = await normalizeBom(value, wid, connection);
     if (entity === 'quotations') value = await normalizeQuotation(value, wid, req.body, connection);
     if (entity === 'quotations' && ['APPROVED', 'ACCEPTED', 'SENT', 'REJECTED'].includes(before.status)) {
-      const revised = await reviseQuotation(before.id, auditActor(req.user), value, connection);
+      const revised = await reviseQuotation(before.id, auditActor(req.user), { ...value, submitAction: req.body?.submitAction }, connection);
       return { status: 201, body: revised, skipGenericAudit: true };
     }
-    if (entity === 'quotations' && req.body.status !== undefined && req.body.status !== before.status) return { status: 409, body: { error: 'Dùng thao tác gửi duyệt hoặc duyệt để đổi trạng thái báo giá.' } };
+    if (entity === 'quotations') {
+      const now = new Date().toISOString();
+      delete value.submitAction;
+      delete value.autoApprove;
+      if (req.user.role === 'OWNER' && ['DRAFT', 'PENDING_APPROVAL'].includes(before.status)) {
+        value.status = 'APPROVED';
+        value.approvedAt = now;
+        value.approvedBy = req.user.name;
+      } else if (before.status === 'DRAFT' && (req.body?.submitAction === 'SUBMIT' || req.body?.status === 'PENDING_APPROVAL')) {
+        value.status = 'PENDING_APPROVAL';
+        value.submittedAt = now;
+        value.submittedBy = req.user.name;
+      } else if (req.body.status !== undefined && req.body.status !== before.status) {
+        return { status: 409, body: { error: 'Dùng thao tác gửi duyệt hoặc duyệt để đổi trạng thái báo giá.' } };
+      }
+    }
 
     if (entity === 'invoices') {
       if ((await listRecords('stock-movements', wid, connection)).some(row => active(row) && row.invoiceId === before.id)) throw businessError('Hóa đơn đã gắn phiếu kho; xử lý phiếu kho trước khi sửa.', 409);
@@ -1331,9 +1369,24 @@ app.post('/api/:entity/:id/actions/:action', requireAuth, requireEntity, async (
   if (!active(before) && action !== 'unlock') throw businessError('Không thao tác chứng từ đã hủy.', 409);
   let after = { ...before, workshopId: wid };
   let createdProduction = null;
-  if (action === 'submit-for-approval' && entity === 'quotations' && before.status === 'DRAFT') after.status = req.user.role === 'OWNER' ? 'APPROVED' : 'PENDING_APPROVAL';
-  else if (action === 'approve' && entity === 'quotations' && req.user.role === 'OWNER' && ['DRAFT', 'PENDING_APPROVAL'].includes(before.status)) { after.status = 'APPROVED'; after.approvedAt = new Date().toISOString(); }
-  else if (action === 'reject' && entity === 'quotations' && req.user.role === 'OWNER' && before.status === 'PENDING_APPROVAL') { if (!String(req.body?.note || '').trim()) throw businessError('Bắt buộc nhập lý do từ chối.'); after.status = 'REJECTED'; after.rejectionNote = String(req.body?.note || ''); }
+  if (action === 'submit-for-approval' && entity === 'quotations' && before.status === 'DRAFT') {
+    after.status = req.user.role === 'OWNER' ? 'APPROVED' : 'PENDING_APPROVAL';
+    after.submittedAt = new Date().toISOString();
+    after.submittedBy = req.user.name;
+    if (after.status === 'APPROVED') { after.approvedAt = after.submittedAt; after.approvedBy = req.user.name; }
+  }
+  else if (action === 'approve' && entity === 'quotations' && req.user.role === 'OWNER' && ['DRAFT', 'PENDING_APPROVAL'].includes(before.status)) {
+    after.status = 'APPROVED';
+    after.approvedAt = new Date().toISOString();
+    after.approvedBy = req.user.name;
+  }
+  else if (action === 'reject' && entity === 'quotations' && req.user.role === 'OWNER' && before.status === 'PENDING_APPROVAL') {
+    if (!String(req.body?.note || '').trim()) throw businessError('Bắt buộc nhập lý do từ chối.');
+    after.status = 'REJECTED';
+    after.rejectionNote = String(req.body?.note || '');
+    after.rejectedAt = new Date().toISOString();
+    after.rejectedBy = req.user.name;
+  }
   else if (action === 'mark-sent' && entity === 'quotations' && ['OWNER', 'ACCOUNTANT'].includes(req.user.role) && before.status === 'APPROVED') { after.status = 'SENT'; after.sentAt = new Date().toISOString(); }
   else if (action === 'accept' && entity === 'quotations' && ['OWNER', 'ACCOUNTANT'].includes(req.user.role) && before.status === 'SENT') { after.status = 'ACCEPTED'; after.acceptedAt = new Date().toISOString(); }
   else if (action === 'create-production' && entity === 'quotations' && ['OWNER', 'ACCOUNTANT'].includes(req.user.role) && before.status === 'ACCEPTED') {

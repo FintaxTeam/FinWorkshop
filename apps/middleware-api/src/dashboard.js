@@ -80,7 +80,11 @@ export function dashboardSnapshot(data, query = {}, integration = {}) {
   }
   const unclassified = transactions.filter((row) => ['UNCLASSIFIED', 'NEEDS_REVIEW'].includes(row.classification) || row.status === 'NEEDS_REVIEW');
   const reviewInvoices = invoices.filter((row) => ['REVIEW_REQUIRED', 'NEEDS_REVIEW'].includes(row.status) || row.direction === 'OUTPUT' && !row.mockTaxCode);
-  const pendingQuotes = all('quotations').filter((row) => row.status === 'PENDING_APPROVAL');
+  const allQuotes = all('quotations');
+  const pendingQuotes = allQuotes.filter((row) => row.status === 'PENDING_APPROVAL');
+  const approvedQuotes = allQuotes.filter((row) => row.status === 'APPROVED');
+  const rejectedQuotes = allQuotes.filter((row) => row.status === 'REJECTED');
+  const acceptedQuotes = allQuotes.filter((row) => row.status === 'ACCEPTED' && !row.productionOrderId);
   const reconciliationIssues = all('reconciliations').filter((row) => ['MISMATCH', 'UNRESOLVED', 'PARTIAL'].includes(row.status));
   const period = all('tax-periods').filter((row) => row.startDate <= to && row.endDate >= from).sort((a, b) => (a.status === 'LOCKED' ? -1 : 1) - (b.status === 'LOCKED' ? -1 : 1))[0];
   const recentDocuments = ['invoices', 'transactions', 'quotations', 'stock-movements'].flatMap((entity) => all(entity).map((row) => ({ id: row.id, entity, viewKey: row.code || row.id, code: row.code || row.externalReference || (entity === 'transactions' ? 'Giao dịch thu chi' : 'Chứng từ'), counterparty: row.counterparty || row.customerName || row.materialName, date: row.date, createdAt: row.createdAt, direction: row.direction || row.type, total: number(row.total ?? row.amount ?? number(row.quantity) * number(row.unitCost)), status: row.paymentStatus || row.status }))).sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || String(b.createdAt || '').localeCompare(String(a.createdAt || ''))).slice(0, 5);
@@ -89,10 +93,23 @@ export function dashboardSnapshot(data, query = {}, integration = {}) {
     chartTotals: { income: sum(trend, 'thu'), expense: sum(trend, 'chi'), net: sum(trend, 'net') },
     expenseBreakdown: [...expenseGroups.values()].filter((row) => row.amount > 0),
     aging: { current: receivables.filter((row) => !row.dueDate || row.dueDate >= today).reduce((total, row) => total + number(row.openBalance ?? row.total), 0), overdue: metrics.overdueAmount },
-    actions: { pendingQuotes: pendingQuotes.slice(0, 3), quotationCount: pendingQuotes.length, unclassifiedCount: unclassified.length, reviewInvoiceCount: reviewInvoices.length, reconciliationCount: reconciliationIssues.length, pendingOdoo: integration.pendingOdoo || 0 },
+    actions: {
+      pendingQuotes: pendingQuotes.slice(0, 3),
+      quotationCount: pendingQuotes.length,
+      approvedQuotes: approvedQuotes.slice(0, 3),
+      approvedQuoteCount: approvedQuotes.length,
+      rejectedQuotes: rejectedQuotes.slice(0, 3),
+      rejectedQuoteCount: rejectedQuotes.length,
+      acceptedQuotes: acceptedQuotes.slice(0, 3),
+      acceptedQuoteCount: acceptedQuotes.length,
+      unclassifiedCount: unclassified.length,
+      reviewInvoiceCount: reviewInvoices.length,
+      reconciliationCount: reconciliationIssues.length,
+      pendingOdoo: integration.pendingOdoo || 0,
+    },
     production: all('production-orders').filter((row) => ['DRAFT', 'IN_PROGRESS'].includes(row.status)).slice(0, 4),
     lowStock: all('materials').filter((row) => number(row.stock) <= number(row.minStock)).slice(0, 5),
-    recentDocuments, recentTransactions: relevant.slice(0, 5), quotations: pendingQuotes.slice(0, 4), invoices: periodInvoices.slice(0, 4),
+    recentDocuments, recentTransactions: relevant.slice(0, 5), quotations: (pendingQuotes.length ? pendingQuotes : approvedQuotes).slice(0, 4), invoices: periodInvoices.slice(0, 4),
     period: period ? { id: period.id, name: period.name, status: period.status, startDate: period.startDate, endDate: period.endDate } : { name: 'Kỳ chưa thiết lập', status: 'OPEN' },
     integrations: integration, alerts: all('alerts').filter((row) => row.status === 'OPEN').slice(0, 5), dataMode: 'DEMO',
   };

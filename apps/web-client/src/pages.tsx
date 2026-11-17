@@ -82,7 +82,20 @@ function ResourcePage({ entity, title, columns, fields, actions, toolbar, rowExt
   useEffect(() => { const view = params.get('view'); if (view && view !== openedView && !loading) { const match = rows.find((row) => (!fixedType || row.direction === fixedType || row.type === fixedType) && (row.code === view || row.id === view)); if (match) { setDetail(match); setOpenedView(view); } } }, [params,rows,loading,openedView]);
   const save = async (value: Record<string, unknown>) => {
     setBusy(true);
-    try { if (editing) await updateRecord(entity, editing.id, value); else await createRecord(entity, { ...value, ...(fixedType ? { type: fixedType, direction: fixedType } : {}) }); closeEditor(); toast(isEn ? 'Record saved successfully.' : 'Đã lưu giấy tờ.'); window.dispatchEvent(new Event('fintax:records-changed')); }
+    try {
+      if (editing) await updateRecord(entity, editing.id, value);
+      else await createRecord(entity, { ...value, ...(fixedType ? { type: fixedType, direction: fixedType } : {}) });
+      closeEditor();
+      const saveMsg = entity === 'quotations'
+        ? value.submitAction === 'DRAFT'
+          ? (isEn ? 'Saved quotation draft (visible only to you).' : 'Đã lưu bản nháp báo giá (chỉ mình bạn nhìn thấy).')
+          : value.submitAction === 'SUBMIT'
+          ? (isEn ? 'Saved and submitted quotation for approval.' : 'Đã lưu và gửi báo giá chờ Chủ xưởng duyệt.')
+          : (isEn ? 'Saved and approved quotation.' : 'Đã lưu và duyệt báo giá.')
+        : (isEn ? 'Record saved successfully.' : 'Đã lưu giấy tờ.');
+      toast(saveMsg);
+      window.dispatchEvent(new Event('fintax:records-changed'));
+    }
     catch (error) { throw new Error(messageOf(error)); } finally { setBusy(false); }
   };
   const perform = async (row: Row, item: Action, note = '') => {
@@ -210,7 +223,6 @@ const quoteActions = (row: Row, role: string): Action[] => {
   if (['OWNER', 'ACCOUNTANT'].includes(role) && row.status === 'SENT') return [{ label: 'Khách đã chấp nhận', action: 'accept', variant: 'primary' }, { label: 'Tạo phiên bản mới', action: 'revise', variant: 'secondary' }];
   if (['OWNER', 'ACCOUNTANT'].includes(role) && row.status === 'REJECTED') return [{ label: 'Tạo phiên bản mới', action: 'revise', variant: 'secondary' }];
   if (role === 'OWNER' && row.status === 'PENDING_APPROVAL') return [{ label: 'Duyệt', action: 'approve', variant: 'primary' }, { label: 'Từ chối', action: 'reject' }];
-  if (role === 'OWNER' && row.status === 'DRAFT') return [{ label: 'Duyệt ngay', action: 'approve', variant: 'primary' }];
   if (role === 'ACCOUNTANT' && row.status === 'DRAFT') return [{ label: 'Gửi duyệt', action: 'submit-for-approval', variant: 'primary' }];
   if (['OWNER', 'ACCOUNTANT'].includes(role) && row.status === 'ACCEPTED' && !row.productionOrderId) return [{ label: 'Tạo việc làm', action: 'create-production', variant: 'primary' }];
   return [];

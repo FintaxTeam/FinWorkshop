@@ -311,10 +311,13 @@ export async function listRecords(entity, workshopIdOrExecutor = DEFAULT_WORKSHO
     if (maybeExecutor && maybeExecutor.query) executor = maybeExecutor;
   }
   const [rows] = await executor.query(
-    'SELECT record_id, data, sync_status, updated_at FROM records WHERE entity = ? AND workshop_id = ? ORDER BY updated_at DESC',
+    'SELECT record_id, data, sync_status, created_by, updated_at FROM records WHERE entity = ? AND workshop_id = ? ORDER BY updated_at DESC',
     [entity, wid]
   );
-  return rows.map((row) => ({ ...decodeData(row.data), id: row.record_id, syncStatus: row.sync_status }));
+  return rows.map((row) => {
+    const decoded = decodeData(row.data);
+    return { ...decoded, createdBy: decoded.createdBy || row.created_by || undefined, id: row.record_id, syncStatus: row.sync_status };
+  });
 }
 
 export async function getRecord(entity, id, workshopIdOrExecutor = DEFAULT_WORKSHOP_ID, maybeExecutor = null) {
@@ -327,10 +330,12 @@ export async function getRecord(entity, id, workshopIdOrExecutor = DEFAULT_WORKS
     if (maybeExecutor && maybeExecutor.query) executor = maybeExecutor;
   }
   const [rows] = await executor.query(
-    'SELECT record_id, data, sync_status FROM records WHERE entity = ? AND record_id = ? AND workshop_id = ? LIMIT 1',
+    'SELECT record_id, data, sync_status, created_by FROM records WHERE entity = ? AND record_id = ? AND workshop_id = ? LIMIT 1',
     [entity, id, wid]
   );
-  return rows[0] ? { ...decodeData(rows[0].data), id: rows[0].record_id, syncStatus: rows[0].sync_status } : null;
+  if (!rows[0]) return null;
+  const decoded = decodeData(rows[0].data);
+  return { ...decoded, createdBy: decoded.createdBy || rows[0].created_by || undefined, id: rows[0].record_id, syncStatus: rows[0].sync_status };
 }
 
 export async function getRecordForUpdate(entity, id, workshopIdOrExecutor, maybeExecutor = null) {
@@ -344,10 +349,12 @@ export async function getRecordForUpdate(entity, id, workshopIdOrExecutor, maybe
   }
   if (!executor) throw new Error('getRecordForUpdate requires a transaction connection.');
   const [rows] = await executor.query(
-    'SELECT record_id, data, sync_status FROM records WHERE entity = ? AND record_id = ? AND workshop_id = ? LIMIT 1 FOR UPDATE',
+    'SELECT record_id, data, sync_status, created_by FROM records WHERE entity = ? AND record_id = ? AND workshop_id = ? LIMIT 1 FOR UPDATE',
     [entity, id, wid]
   );
-  return rows[0] ? { ...decodeData(rows[0].data), id: rows[0].record_id, syncStatus: rows[0].sync_status } : null;
+  if (!rows[0]) return null;
+  const decoded = decodeData(rows[0].data);
+  return { ...decoded, createdBy: decoded.createdBy || rows[0].created_by || undefined, id: rows[0].record_id, syncStatus: rows[0].sync_status };
 }
 
 export function recordBusinessKey(entity, value) {

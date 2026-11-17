@@ -1,11 +1,36 @@
 import { useEffect,useMemo,useRef,useState,type ReactNode } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation,useSearchParams } from 'react-router-dom';
 import { Button,EmptyState,SearchBox,StatusBadge } from './components';
 import { exportExcel,type ExportColumn } from './exports';
 import { AlertTriangle,ArrowDownToLine,ArrowUpDown,Check,Columns3,Filter,RotateCcw } from 'lucide-react';
 import { actionLabel,displayLabel,entityLabels,formatNumber,formatTaxRate,isMoneyField,plainValue,referenceText,vietnamDate } from './presentation';
 import { formatDate,formatVnd,statusLabel,today } from './api';
 import { useLanguage } from './language';
+
+const URL_STATUS_CODES = new Set([
+  'DRAFT',
+  'PENDING_APPROVAL',
+  'APPROVED',
+  'SENT',
+  'ACCEPTED',
+  'REJECTED',
+  'CANCELLED',
+  'VOID',
+  'REVIEW_REQUIRED',
+  'NEEDS_REVIEW',
+  'CONFIRMED',
+  'UNPAID',
+  'PARTIAL',
+  'PAID',
+  'IN_PROGRESS',
+  'READY_FOR_RECEIPT',
+  'COMPLETED',
+  'OPEN',
+  'LOCKED',
+  'MATCHED',
+  'MISMATCH',
+  'UNRESOLVED',
+]);
 
 // Các cột phụ mặc định ẩn khi bảng có từ 7 cột trở lên để vừa khít 1 màn hình không cần kéo ngang
 const SECONDARY_COLUMN_KEYS = new Set([
@@ -60,9 +85,13 @@ export function Pagination({ page, pageSize, total, onPage, onPageSize }: { page
 export function DataTable({ title, rows, columns, controls, emptyTitle, emptyHint }: { emptyTitle?: string; emptyHint?: string; title: string; rows: Record<string, any>[]; columns: ExportColumn[]; controls?: (row: any) => ReactNode }) {
   const { t, isEn } = useLanguage();
   const location = useLocation();
+  const [, setSearchParams] = useSearchParams();
   const initialParams = new URLSearchParams(location.search);
-  const initialQ = initialParams.get('q') || '';
-  const initialStatus = initialParams.get('status') || '';
+  const rawInitialQ = initialParams.get('q') || '';
+  const rawInitialStatus = initialParams.get('status') || '';
+  const qIsStatus = !rawInitialStatus && URL_STATUS_CODES.has(rawInitialQ);
+  const initialQ = qIsStatus ? '' : rawInitialQ;
+  const initialStatus = rawInitialStatus || (qIsStatus ? rawInitialQ : '');
   const [search, setSearch] = useState(initialQ), [query, setQuery] = useState(initialQ), [status, setStatus] = useState(initialStatus), [type, setType] = useState(''), [page, setPage] = useState(1), [pageSize, setPageSize] = useState(10), [sort, setSort] = useState({ key: '', descending: false });
   const [colMenuOpen, setColMenuOpen] = useState(false);
   const colMenuRef = useRef<HTMLDivElement>(null);
@@ -154,8 +183,11 @@ export function DataTable({ title, rows, columns, controls, emptyTitle, emptyHin
 
   useEffect(() => {
     const nextParams = new URLSearchParams(location.search);
-    const nextQ = nextParams.get('q') || '';
-    const nextStatus = nextParams.get('status') || '';
+    const rawQ = nextParams.get('q') || '';
+    const rawStatus = nextParams.get('status') || '';
+    const isStatusInQ = !rawStatus && URL_STATUS_CODES.has(rawQ);
+    const nextQ = isStatusInQ ? '' : rawQ;
+    const nextStatus = rawStatus || (isStatusInQ ? rawQ : '');
     setSearch(nextQ);
     setQuery(nextQ);
     setStatus(nextStatus);
@@ -163,8 +195,21 @@ export function DataTable({ title, rows, columns, controls, emptyTitle, emptyHin
   }, [location.pathname, location.search]);
   useEffect(() => { const timer = window.setTimeout(() => setQuery(search), 250); return () => window.clearTimeout(timer); }, [search]);
   const typeOf = (row: any) => String(row.direction || row.type || row.category || row.role || '');
-  const statuses = [...new Set(rows.flatMap((row) => [row.status, row.paymentStatus, row.approvalStatus]).filter(Boolean).map(String))];
+  const baseStatuses = rows.flatMap((row) => [row.status, row.paymentStatus, row.approvalStatus]).filter(Boolean).map(String);
+  const statuses = [...new Set([...(status ? [status] : []), ...baseStatuses])];
   const types = [...new Set(rows.map(typeOf).filter(Boolean))];
+  const handleStatusChange = (nextStatus: string) => {
+    setStatus(nextStatus);
+    if (URL_STATUS_CODES.has(search)) {
+      setSearch('');
+      setQuery('');
+    }
+    const nextParams = new URLSearchParams(location.search);
+    if (URL_STATUS_CODES.has(nextParams.get('q') || '')) nextParams.delete('q');
+    if (nextStatus) nextParams.set('status', nextStatus);
+    else nextParams.delete('status');
+    setSearchParams(nextParams, { replace: true });
+  };
   const filtered = useMemo(() => rows.filter((row) => (!query || [JSON.stringify(row),...Object.values(row).filter((value) => typeof value === 'string').map(displayLabel)].join(' ').toLocaleLowerCase(isEn ? 'en-US' : 'vi').includes(query.toLocaleLowerCase(isEn ? 'en-US' : 'vi'))) && (!status || [row.status, row.paymentStatus, row.approvalStatus].includes(status)) && (!type || typeOf(row) === type)), [rows, query, status, type, isEn]);
   const sorted = useMemo(() => sort.key ? [...filtered].sort((a,b) => { const x = a[sort.key], y = b[sort.key]; const order = typeof x === 'number' && typeof y === 'number' ? x - y : String(x ?? '').localeCompare(String(y ?? ''), isEn ? 'en-US' : 'vi', { numeric: true }); return sort.descending ? -order : order; }) : filtered, [filtered, sort, isEn]);
   useEffect(() => setPage(1), [query, status, type]);
@@ -202,7 +247,7 @@ export function DataTable({ title, rows, columns, controls, emptyTitle, emptyHin
       <div className="flex w-full flex-wrap items-center gap-2 lg:w-auto">
         <div className="w-full sm:w-60"><SearchBox value={search} onChange={setSearch}/></div>
         <Filter size={14} className="hidden text-slate-400 sm:block"/>
-        <select aria-label={isEn ? 'Filter status' : 'Lọc trạng thái'} value={status} onChange={(event) => setStatus(event.target.value)} className="max-w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700">
+        <select aria-label={isEn ? 'Filter status' : 'Lọc trạng thái'} value={status} onChange={(event) => handleStatusChange(event.target.value)} className="max-w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700">
           <option value="">{t('Tất cả trạng thái')}</option>
           {statuses.map((value) => <option key={value} value={value}>{statusLabel(value)}</option>)}
         </select>

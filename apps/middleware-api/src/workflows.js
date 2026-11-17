@@ -191,10 +191,35 @@ export async function reviseQuotation(id, actor, overrides = {}, existingConnect
     const rootId = before.parentQuoteId || before.id;
     const related = (await listRecords('quotations', wid, connection)).filter((row) => row.id === rootId || row.parentQuoteId === rootId);
     const version = Math.max(1, ...related.map((row) => number(row.version || 1))) + 1;
+    const submitAction = overrides.submitAction;
     const copy = structuredClone({ ...before, ...overrides });
-    for (const key of ['id', 'syncStatus', 'odooId', 'odooModel', 'odooUrl', 'odooMirrorId', 'productionOrderId', 'productionCreatedAt', 'acceptedAt', 'sentAt', 'approvedAt']) delete copy[key];
+    for (const key of ['id', 'syncStatus', 'odooId', 'odooModel', 'odooUrl', 'odooMirrorId', 'productionOrderId', 'productionCreatedAt', 'acceptedAt', 'sentAt', 'approvedAt', 'submitAction']) delete copy[key];
     const rootCode = before.rootCode || before.code.replace(/-v\d+$/i, '');
-    const saved = await saveRecord('quotations', { ...copy, id: randomUUID(), code: `${rootCode}-v${version}`, rootCode, version, status: 'DRAFT', parentQuoteId: rootId, previousVersionId: before.id, rejectionNote: before.rejectionNote || before.sourceRejectionNote || '', sourceRejectionNote: before.rejectionNote || before.sourceRejectionNote || '', createdAt: new Date().toISOString() }, actor.id, wid, connection);
+    const now = new Date().toISOString();
+    let nextStatus = 'DRAFT';
+    if (actor.role === 'OWNER') {
+      nextStatus = submitAction === 'DRAFT' ? 'DRAFT' : 'APPROVED';
+    } else if (submitAction === 'SUBMIT') {
+      nextStatus = 'PENDING_APPROVAL';
+    }
+    const saved = await saveRecord('quotations', {
+      ...copy,
+      id: randomUUID(),
+      code: `${rootCode}-v${version}`,
+      rootCode,
+      version,
+      status: nextStatus,
+      ...(nextStatus === 'APPROVED' ? { approvedAt: now, approvedBy: actor.name } : {}),
+      ...(nextStatus === 'PENDING_APPROVAL' ? { submittedAt: now, submittedBy: actor.name } : {}),
+      createdBy: actor.id,
+      createdByName: actor.name,
+      createdByRole: actor.role,
+      parentQuoteId: rootId,
+      previousVersionId: before.id,
+      rejectionNote: before.rejectionNote || before.sourceRejectionNote || '',
+      sourceRejectionNote: before.rejectionNote || before.sourceRejectionNote || '',
+      createdAt: now,
+    }, actor.id, wid, connection);
     await audit(connection, actor, 'QUOTATION_REVISED', 'quotations', before, saved, before.rejectionNote);
     return saved;
   };

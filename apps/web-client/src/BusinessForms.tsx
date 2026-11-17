@@ -13,11 +13,17 @@ function Field({label,children}: {label:string;children:ReactNode}){
   return <label className="block text-xs font-semibold text-slate-700">{label}{children}</label>;
 }
 
-function FormShell({title,onClose,onSubmit,children}:{title:string;onClose:()=>void;onSubmit:()=>Promise<void>;children:ReactNode}){
+function FormShell({title,onClose,onSubmit,submitLabel='Lưu',secondarySubmitLabel,onSecondarySubmit,children}:{title:string;onClose:()=>void;onSubmit:()=>Promise<void>;submitLabel?:string;secondarySubmitLabel?:string;onSecondarySubmit?:()=>Promise<void>;children:ReactNode}){
   const [busy,setBusy]=useState(false),[error,setError]=useState('');
   const dialogRef=useRef<HTMLFormElement>(null);
   useDialogFocusTrap(dialogRef,onClose,busy);
   const submit=async(event:FormEvent)=>{event.preventDefault();setBusy(true);setError('');try{await onSubmit();}catch(reason){setError(messageOf(reason));}finally{setBusy(false);}};
+  const submitSecondary=async()=>{
+    if (dialogRef.current && !dialogRef.current.reportValidity()) return;
+    if (!onSecondarySubmit) return;
+    setBusy(true);setError('');
+    try{await onSecondarySubmit();}catch(reason){setError(messageOf(reason));}finally{setBusy(false);}
+  };
 
   const modalContent = (
     <div
@@ -55,9 +61,14 @@ function FormShell({title,onClose,onSubmit,children}:{title:string;onClose:()=>v
 
         <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-slate-200 bg-slate-50/90 px-5 py-3">
           <span className="text-[11px] text-slate-400 hidden sm:inline">Kiểm tra kỹ số liệu trước khi lưu</span>
-          <div className="ml-auto flex items-center gap-2">
-            <Button variant="secondary" compact onClick={onClose} disabled={busy}>Hủy</Button>
-            <Button type="submit" compact disabled={busy}>{busy ? 'Đang lưu…' : 'Lưu'}</Button>
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <Button variant="ghost" compact onClick={onClose} disabled={busy}>Hủy</Button>
+            {secondarySubmitLabel && onSecondarySubmit && (
+              <Button variant="secondary" compact onClick={()=>void submitSecondary()} disabled={busy}>
+                {busy ? 'Đang lưu…' : secondarySubmitLabel}
+              </Button>
+            )}
+            <Button type="submit" compact disabled={busy}>{busy ? 'Đang lưu…' : submitLabel}</Button>
           </div>
         </footer>
       </form>
@@ -280,14 +291,15 @@ export function QuotationModal({initial={},onClose,onSubmit}:FormProps){
   const effectiveDiscountPct = subtotal > 0 ? Math.round((discount / subtotal) * 10000) / 100 : 0;
   const grandTotal = Math.max(0, subtotal + tax - discount);
 
-  const handleSave = async () => {
+  const handleSave = async (submitAction: 'DRAFT' | 'SUBMIT' | 'APPROVE' = user?.role === 'OWNER' ? 'APPROVE' : 'SUBMIT') => {
     const primary = normalizedItems[0];
     const summaryTitle = normalizedItems.length > 1
       ? `${primary.name} (+${normalizedItems.length - 1} mục)`
       : primary.name;
     await onSubmit({
       ...header,
-      autoApprove: user?.role === 'OWNER',
+      submitAction,
+      autoApprove: user?.role === 'OWNER' && submitAction === 'APPROVE',
       title: summaryTitle,
       productId: primary.productId || undefined,
       unit: primary.unit || 'sản phẩm',
@@ -318,7 +330,14 @@ export function QuotationModal({initial={},onClose,onSubmit}:FormProps){
     });
   };
 
-  return <FormShell title={initial.id?`Sửa báo giá · v${initial.version||1}`:'Lập báo giá khách hàng'} onClose={onClose} onSubmit={handleSave}>
+  return <FormShell
+    title={initial.id?`Sửa báo giá · v${initial.version||1}`:'Lập báo giá khách hàng'}
+    onClose={onClose}
+    onSubmit={() => handleSave(user?.role === 'OWNER' ? 'APPROVE' : 'SUBMIT')}
+    submitLabel={user?.role === 'OWNER' ? 'Lưu & Duyệt báo giá' : 'Lưu & Gửi duyệt ngay'}
+    secondarySubmitLabel={user?.role !== 'OWNER' ? 'Lưu bản nháp' : undefined}
+    onSecondarySubmit={user?.role !== 'OWNER' ? () => handleSave('DRAFT') : undefined}
+  >
     {(initial.rejectionNote||initial.sourceRejectionNote)&&<p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900"><strong>Lý do từ chối: </strong>{initial.rejectionNote||initial.sourceRejectionNote}</p>}
     {error&&<p role="alert" className="text-xs text-red-700">{error}</p>}
 

@@ -74,6 +74,7 @@ export function DashboardPage() {
   };
   const retry = async () => { setSyncing(true); try { const { data } = await api.post('/integrations/odoo/sync-pending'); const count = data.results.filter((row: any) => row.status === 'SYNCED').length; toast(`Đã đồng bộ ${count}/${data.attempted} hồ sơ.`); await load(); } catch (error) { toast(messageOf(error),'error'); } finally { setSyncing(false); } };
   const approve = async (id: string) => { try { await actionRecord('quotations',id,'approve'); await load(); toast('Đã duyệt báo giá.'); } catch (error) { toast(messageOf(error),'error'); } };
+  const markSent = async (id: string) => { try { await actionRecord('quotations',id,'mark-sent'); await load(); toast('Đã đánh dấu gửi báo giá cho khách.'); } catch (error) { toast(messageOf(error),'error'); } };
   const metrics = data?.metrics || {}, actions = data?.actions || {}, tax = data?.tax || {}, comparison = data?.comparison || {};
   const ticks = moneyTicks(Math.max(1,...(data?.trend || []).flatMap((row: any) => [row.thu,row.chi])));
   const costs = data?.expenseBreakdown || [], costTotal = costs.reduce((sum: number,row: any) => sum+row.amount,0);
@@ -81,6 +82,7 @@ export function DashboardPage() {
 
   const urgentCount =
     Number(actions.quotationCount || 0) +
+    (user?.role !== 'OWNER' ? Number(actions.approvedQuoteCount || 0) + Number(actions.rejectedQuoteCount || 0) + Number(actions.acceptedQuoteCount || 0) : 0) +
     Number(actions.unclassifiedCount || 0) +
     Number(actions.reviewInvoiceCount || 0) +
     Number(actions.reconciliationCount || 0) +
@@ -223,13 +225,51 @@ export function DashboardPage() {
               <Card className="overflow-hidden">
                 <WidgetHeader icon={<AlertTriangle size={15}/>} title="Cần xử lý ngay"/>
                 <div className="divide-y divide-slate-100">
-                  <Task count={actions.quotationCount} label="Báo giá chờ duyệt" to="/quotations?q=PENDING_APPROVAL" action="Xem báo giá"/>
-                  {user?.role === 'OWNER' && actions.pendingQuotes?.map((quote: any) => (
-                    <div key={quote.id} className="flex items-center justify-between gap-2 bg-amber-50/70 px-4 py-2 border-b border-amber-100">
-                      <span className="truncate text-xs font-semibold text-amber-900">{quote.code}</span>
-                      <Button className="shrink-0" compact onClick={() => void approve(quote.id)}>Duyệt ngay</Button>
-                    </div>
-                  ))}
+                  {user?.role === 'OWNER' ? (
+                    <>
+                      <Task count={actions.quotationCount} label="Báo giá chờ duyệt" to="/quotations?status=PENDING_APPROVAL" action="Xem báo giá"/>
+                      {actions.pendingQuotes?.map((quote: any) => (
+                        <div key={quote.id} className="flex items-center justify-between gap-2 bg-amber-50/70 px-4 py-2 border-b border-amber-100">
+                          <div className="min-w-0">
+                            <span className="block truncate text-xs font-bold text-amber-900">{quote.code} · {quote.customerName}</span>
+                            <span className="block truncate text-[11px] text-amber-700">{quote.title} ({formatVnd(quote.total)})</span>
+                          </div>
+                          <Button className="shrink-0" compact onClick={() => void approve(quote.id)}>Duyệt ngay</Button>
+                        </div>
+                      ))}
+                      {Number(actions.approvedQuoteCount) > 0 && (
+                        <Task count={actions.approvedQuoteCount} label="Báo giá đã duyệt · Chờ gửi khách" to="/quotations?status=APPROVED" action="Xem"/>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <Task count={actions.approvedQuoteCount} label="Báo giá đã được Chủ xưởng duyệt · Cần gửi khách" to="/quotations?status=APPROVED" action="Gửi khách"/>
+                      {actions.approvedQuotes?.map((quote: any) => (
+                        <div key={quote.id} className="flex items-center justify-between gap-2 bg-emerald-50/80 px-4 py-2 border-b border-emerald-100">
+                          <div className="min-w-0">
+                            <span className="block truncate text-xs font-bold text-emerald-900">✓ Đã duyệt: {quote.code} · {quote.customerName}</span>
+                            <span className="block truncate text-[11px] text-emerald-700">{quote.title} · {formatVnd(quote.total)}</span>
+                          </div>
+                          <Button variant="secondary" className="shrink-0" compact onClick={() => void markSent(quote.id)}>Đã gửi khách</Button>
+                        </div>
+                      ))}
+                      {Number(actions.rejectedQuoteCount) > 0 && (
+                        <>
+                          <Task count={actions.rejectedQuoteCount} label="Báo giá bị từ chối · Cần chỉnh sửa lại" to="/quotations?status=REJECTED" action="Sửa lại"/>
+                          {actions.rejectedQuotes?.map((quote: any) => (
+                            <Link key={quote.id} to={`/quotations?status=REJECTED&view=${encodeURIComponent(quote.code)}`} className="block bg-rose-50/80 px-4 py-2 border-b border-rose-100 hover:bg-rose-100/70 transition-colors">
+                              <span className="block truncate text-xs font-bold text-rose-900">✕ Bị từ chối: {quote.code} · {quote.customerName}</span>
+                              {quote.rejectionNote && <span className="block truncate text-[11px] text-rose-700">Lý do: {quote.rejectionNote}</span>}
+                            </Link>
+                          ))}
+                        </>
+                      )}
+                      {Number(actions.acceptedQuoteCount) > 0 && (
+                        <Task count={actions.acceptedQuoteCount} label="Báo giá khách đã chốt · Cần tạo việc làm" to="/quotations?status=ACCEPTED" action="Tạo việc làm"/>
+                      )}
+                      <Task count={actions.quotationCount} label="Báo giá đang chờ Chủ xưởng duyệt" to="/quotations?status=PENDING_APPROVAL" action="Theo dõi"/>
+                    </>
+                  )}
                   <Task count={actions.unclassifiedCount} label="Khoản thu chi chưa phân loại" to="/transactions?q=UNCLASSIFIED" action="Phân loại"/>
                   <Task count={Number(actions.reviewInvoiceCount || 0)+Number(actions.reconciliationCount || 0)} label="Hóa đơn / Khớp ngân hàng cần rà soát" to="/invoices" action="Rà soát"/>
                   <div className="flex items-center gap-3 px-4 py-3">
