@@ -145,7 +145,24 @@ function AppShell() {
   const [subBarCollapsed, setSubBarCollapsed] = useState(() => localStorage.getItem('fin_subbar_collapsed') === 'true');
 
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const closeTimerRef = useRef<number | null>(null);
   const currentTitle = t(titles[location.pathname] || 'FinTax');
+
+  const openNavGroup = (id: string | null) => {
+    if (closeTimerRef.current) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+    setOpenDropdown(id);
+  };
+
+  const scheduleCloseNavGroup = () => {
+    if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = window.setTimeout(() => {
+      setOpenDropdown(null);
+      closeTimerRef.current = null;
+    }, 150);
+  };
 
   useEffect(() => {
     document.title = `${currentTitle} · FinWorkshop`;
@@ -228,19 +245,23 @@ function AppShell() {
           </div>
 
           {/* Center: Desktop Top Navigation Groups with Dropdowns */}
-          <nav ref={dropdownRef} onMouseLeave={() => setOpenDropdown(null)} className="hidden lg:flex items-center gap-1">
+          <nav ref={dropdownRef} className="hidden lg:flex items-center gap-1">
             {visibleNav.map((group) => {
               const isGroupActive = group.items.some((item) => item.to === location.pathname);
               const isOpen = openDropdown === group.id;
               const hasMultiple = group.items.length > 1;
 
               return (
-                <div key={group.id} className="relative">
+                <div
+                  key={group.id}
+                  className="relative"
+                  onMouseEnter={() => openNavGroup(hasMultiple ? group.id : null)}
+                  onMouseLeave={scheduleCloseNavGroup}
+                >
                   {hasMultiple ? (
                     <button
                       type="button"
-                      onClick={() => setOpenDropdown(isOpen ? null : group.id)}
-                      onMouseEnter={() => setOpenDropdown(group.id)}
+                      onClick={() => openNavGroup(isOpen ? null : group.id)}
                       className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
                         isGroupActive
                           ? 'bg-slate-100 text-brand-700 border-b-2 border-brand-600 shadow-xs'
@@ -254,7 +275,6 @@ function AppShell() {
                   ) : (
                     <Link
                       to={group.items[0].to}
-                      onMouseEnter={() => setOpenDropdown(null)}
                       className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
                         isGroupActive
                           ? 'bg-slate-100 text-brand-700 border-b-2 border-brand-600 shadow-xs'
@@ -266,33 +286,35 @@ function AppShell() {
                     </Link>
                   )}
 
-                  {/* Dropdown Menu for Sub-items */}
+                  {/* Dropdown Menu for Sub-items (pt-1.5 tạo cầu nối liền mạch không bị hở khoảng trống chuột) */}
                   {hasMultiple && isOpen && (
                     <div
-                      onMouseLeave={() => setOpenDropdown(null)}
-                      className="absolute left-0 top-full mt-1.5 z-50 min-w-56 rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl animate-in fade-in zoom-in-95 duration-100 text-slate-800"
+                      onMouseEnter={() => openNavGroup(group.id)}
+                      className="absolute left-0 top-full pt-1.5 z-50 min-w-56"
                     >
-                      <div className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400 border-b border-slate-100 mb-1">
-                        {t(group.section)}
+                      <div className="rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl animate-in fade-in zoom-in-95 duration-100 text-slate-800">
+                        <div className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400 border-b border-slate-100 mb-1">
+                          {t(group.section)}
+                        </div>
+                        {group.items.map((item) => {
+                          const isItemActive = location.pathname === item.to;
+                          return (
+                            <Link
+                              key={item.to}
+                              to={item.to}
+                              onClick={() => openNavGroup(null)}
+                              className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
+                                isItemActive
+                                  ? 'bg-brand-50 text-brand-700 font-semibold'
+                                  : 'text-slate-700 hover:bg-slate-50 hover:text-slate-900'
+                              }`}
+                            >
+                              <item.icon size={15} className={isItemActive ? 'text-brand-600' : 'text-slate-400'} />
+                              <span>{t(item.label)}</span>
+                            </Link>
+                          );
+                        })}
                       </div>
-                      {group.items.map((item) => {
-                        const isItemActive = location.pathname === item.to;
-                        return (
-                          <Link
-                            key={item.to}
-                            to={item.to}
-                            onClick={() => setOpenDropdown(null)}
-                            className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
-                              isItemActive
-                                ? 'bg-brand-50 text-brand-700 font-semibold'
-                                : 'text-slate-700 hover:bg-slate-50 hover:text-slate-900'
-                            }`}
-                          >
-                            <item.icon size={15} className={isItemActive ? 'text-brand-600' : 'text-slate-400'} />
-                            <span>{t(item.label)}</span>
-                          </Link>
-                        );
-                      })}
                     </div>
                   )}
                 </div>
@@ -327,7 +349,10 @@ function AppShell() {
             </Link>
 
             {['OWNER', 'ACCOUNTANT'].includes(user?.role || '') && (
-              <div className="relative hidden sm:block">
+              <div
+                className="relative hidden sm:block"
+                onMouseLeave={() => setQuickOpen(false)}
+              >
                 <button
                   type="button"
                   onClick={() => setQuickOpen((v) => !v)}
@@ -338,31 +363,30 @@ function AppShell() {
                   <ChevronDown size={12} className={`opacity-80 transition-transform ${quickOpen ? 'rotate-180' : ''}`} />
                 </button>
                 {quickOpen && (
-                  <div
-                    onMouseLeave={() => setQuickOpen(false)}
-                    className="absolute right-0 top-10 z-50 w-52 rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl text-slate-800"
-                  >
-                    <div className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400 border-b border-slate-100 mb-1">
-                      {t('Tạo nhanh')}
+                  <div className="absolute right-0 top-full pt-1.5 z-50 w-52">
+                    <div className="rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl text-slate-800">
+                      <div className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400 border-b border-slate-100 mb-1">
+                        {t('Tạo nhanh')}
+                      </div>
+                      {[
+                        { to: '/quotations?new=1', label: 'Lập báo giá mới', icon: FileClock },
+                        { to: '/invoices?new=1&type=OUTPUT', label: 'Hóa đơn bán hàng', icon: FileCheck2 },
+                        { to: '/invoices?new=1&type=INPUT', label: 'Hóa đơn mua vật tư', icon: BriefcaseBusiness },
+                        { to: '/transactions?new=1', label: 'Phiếu thu / chi quỹ', icon: Wallet },
+                        { to: '/payments?new=1', label: 'Thu / Trả công nợ', icon: ArrowLeftRight },
+                        { to: '/inventory?new=1', label: 'Phiếu nhập / xuất kho', icon: Boxes },
+                      ].map((q) => (
+                        <Link
+                          key={q.to}
+                          to={q.to}
+                          onClick={() => setQuickOpen(false)}
+                          className="flex items-center gap-2.5 rounded-lg px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 hover:text-brand-700 transition-colors"
+                        >
+                          <q.icon size={14} className="text-brand-600 shrink-0" />
+                          <span>{q.label}</span>
+                        </Link>
+                      ))}
                     </div>
-                    {[
-                      { to: '/quotations?new=1', label: 'Lập báo giá mới', icon: FileClock },
-                      { to: '/invoices?new=1&type=OUTPUT', label: 'Hóa đơn bán hàng', icon: FileCheck2 },
-                      { to: '/invoices?new=1&type=INPUT', label: 'Hóa đơn mua vật tư', icon: BriefcaseBusiness },
-                      { to: '/transactions?new=1', label: 'Phiếu thu / chi quỹ', icon: Wallet },
-                      { to: '/payments?new=1', label: 'Thu / Trả công nợ', icon: ArrowLeftRight },
-                      { to: '/inventory?new=1', label: 'Phiếu nhập / xuất kho', icon: Boxes },
-                    ].map((q) => (
-                      <Link
-                        key={q.to}
-                        to={q.to}
-                        onClick={() => setQuickOpen(false)}
-                        className="flex items-center gap-2.5 rounded-lg px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 hover:text-brand-700 transition-colors"
-                      >
-                        <q.icon size={14} className="text-brand-600 shrink-0" />
-                        <span>{q.label}</span>
-                      </Link>
-                    ))}
                   </div>
                 )}
               </div>
