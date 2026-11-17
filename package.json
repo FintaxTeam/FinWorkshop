@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "dev": "concurrently -k -n api,tax,web -c blue,magenta,green \"npm:dev:api\" \"npm:dev:tax\" \"npm:dev:web\"",
-    "dev:web": "npm --workspace apps/web-client run dev -- --host 0.0.0.0",
+    "dev:web": "npm --workspace apps/web-client run dev",
     "dev:api": "npm --workspace apps/middleware-api run dev",
     "dev:tax": "npm --workspace apps/mock-tax-api run dev",
     "build": "npm --workspace apps/web-client run build",

@@ -7,7 +7,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(() => {
     try { const cached = localStorage.getItem('fintax_user'); return cached ? JSON.parse(cached) as User : null; } catch { return null; }
   });
-  const [loading, setLoading] = useState(Boolean(localStorage.getItem('fintax_token')));
+  const [loading, setLoading] = useState(() => Boolean(localStorage.getItem('fintax_token') && !localStorage.getItem('fintax_user')));
   const logout = () => { localStorage.removeItem('fintax_token'); localStorage.removeItem('fintax_user'); setUser(null); };
   useEffect(() => {
     const handleExpired = () => setUser(null);

@@ -85,6 +85,230 @@ export function StatusBadge({ status, label }: { status?: unknown; label?: strin
 
 export type FieldDef = { name: string; label: string; type?: 'text' | 'password' | 'number' | 'date' | 'select' | 'textarea' | 'file'; required?: boolean; placeholder?: string; options?: { value: string; label: string }[]; wide?: boolean; min?: number; max?: number; readOnly?: boolean };
 
+const formatDots = (num: number | string) => {
+  const digits = String(num ?? '').replace(/\D/g, '').replace(/^0+(?=\d)/, '');
+  if (!digits) return '';
+  return digits.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+};
+
+/**
+ * Ô nhập tiền VNĐ thông minh:
+ * - Tự động tách dấu chấm hàng nghìn (1.000.000)
+ * - Xóa hết số 0 dễ dàng, không bị dính số 0 ở đầu (05)
+ * - Gợi ý nhanh mệnh giá tiền VNĐ (.000 / triệu) kiểu MISA / KiotViet
+ */
+export function MoneyInput({
+  value,
+  onChange,
+  required,
+  readOnly,
+  placeholder = '0',
+  ariaLabel,
+  className = '',
+  showPresets = true,
+}: {
+  value: number | string | undefined;
+  onChange: (num: number) => void;
+  required?: boolean;
+  readOnly?: boolean;
+  placeholder?: string;
+  ariaLabel?: string;
+  className?: string;
+  showPresets?: boolean;
+}) {
+  const numericValue = Number(String(value ?? '').replace(/[^\d-]/g, '')) || 0;
+  const [focused, setFocused] = useState(false);
+  const [raw, setRaw] = useState(() => (numericValue > 0 ? formatDots(numericValue) : ''));
+
+  useEffect(() => {
+    if (!focused) {
+      setRaw(numericValue > 0 ? formatDots(numericValue) : '');
+    }
+  }, [numericValue, focused]);
+
+  const handleInput = (text: string) => {
+    const digits = text.replace(/\D/g, '').replace(/^0+(?=\d)/, '');
+    if (!digits) {
+      setRaw('');
+      onChange(0);
+      return;
+    }
+    const num = Number(digits);
+    setRaw(formatDots(digits));
+    onChange(num);
+  };
+
+  const pickPreset = (amount: number) => {
+    setRaw(formatDots(amount));
+    onChange(amount);
+  };
+
+  // Gợi ý mệnh giá thông minh: Nếu gõ 1..99999 thì gợi ý nhân 1.000 / 10.000 / 100.000; nếu đang trống thì gợi ý mức phổ biến
+  const suggestions =
+    numericValue > 0 && numericValue < 100000
+      ? [numericValue * 1000, numericValue * 10000, numericValue * 100000, numericValue * 1000000]
+          .filter((v, idx, arr) => v >= 1000 && v <= 10000000000 && arr.indexOf(v) === idx)
+          .slice(0, 3)
+      : [100000, 500000, 1000000, 5000000];
+
+  return (
+    <div className="w-full">
+      <div className="relative flex items-center">
+        <input
+          type="text"
+          inputMode="numeric"
+          aria-label={ariaLabel}
+          readOnly={readOnly}
+          required={required && numericValue === 0 && raw === ''}
+          placeholder={placeholder}
+          value={focused ? raw : numericValue > 0 ? formatDots(numericValue) : ''}
+          onFocus={() => {
+            setFocused(true);
+            setRaw(numericValue > 0 ? formatDots(numericValue) : '');
+          }}
+          onBlur={() => setFocused(false)}
+          onChange={(e) => handleInput(e.target.value)}
+          className={`w-full rounded-lg border border-slate-200 bg-white pl-3 pr-14 py-1.5 text-xs sm:text-sm font-semibold tabular-nums text-slate-900 outline-none transition-colors focus:border-brand-600 focus:ring-2 focus:ring-brand-100 read-only:bg-slate-50 ${className}`}
+        />
+        <div className="absolute right-1.5 flex items-center gap-1">
+          {!readOnly && numericValue > 0 && numericValue < 100000000 && (
+            <button
+              type="button"
+              tabIndex={-1}
+              title="Thêm 3 số 0 (.000)"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                pickPreset(numericValue * 1000);
+              }}
+              className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-600 hover:bg-brand-50 hover:text-brand-700"
+            >
+              .000
+            </button>
+          )}
+          <span className="pointer-events-none select-none rounded bg-slate-100/80 px-1.5 py-0.5 text-[10px] font-bold text-slate-500">
+            ₫
+          </span>
+        </div>
+      </div>
+      {showPresets && !readOnly && focused && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-1">
+          {suggestions.map((amt) => (
+            <button
+              key={amt}
+              type="button"
+              tabIndex={-1}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                pickPreset(amt);
+                setFocused(false);
+              }}
+              className="rounded-md border border-brand-200 bg-brand-50/70 px-2 py-0.5 text-[10px] font-semibold tabular-nums text-brand-700 hover:bg-brand-100 transition-colors"
+            >
+              {formatDots(amt)} ₫
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Ô nhập số lượng / phần trăm thông minh:
+ * - Xóa hết số 0 hoặc số 1 không bị nhảy ngược về 0 ngay lập tức
+ * - Không bị dính số 0 ở đầu (ví dụ 05 -> 5)
+ */
+export function SmartNumberInput({
+  value,
+  onChange,
+  min,
+  max,
+  step = 'any',
+  required,
+  readOnly,
+  disabled,
+  placeholder = '0',
+  ariaLabel,
+  suffix,
+  className = '',
+}: {
+  value: number | string | undefined;
+  onChange: (num: number) => void;
+  min?: number;
+  max?: number;
+  step?: string | number;
+  required?: boolean;
+  readOnly?: boolean;
+  disabled?: boolean;
+  placeholder?: string;
+  ariaLabel?: string;
+  suffix?: string;
+  className?: string;
+}) {
+  const [focused, setFocused] = useState(false);
+  const [raw, setRaw] = useState(() => (value === 0 || value === '0' || value === undefined || value === '' ? '' : String(value)));
+
+  useEffect(() => {
+    if (!focused) {
+      setRaw(value === undefined || value === '' ? '' : String(value));
+    }
+  }, [value, focused]);
+
+  const handleChange = (text: string) => {
+    const normalized = text.replace(',', '.');
+    if (normalized === '' || normalized === '-') {
+      setRaw(normalized);
+      onChange(0);
+      return;
+    }
+    if (!/^-?\d*\.?\d*$/.test(normalized)) return;
+    // Bỏ số 0 thừa ở đầu (ví dụ "05" -> "5", nhưng giữ "0.5")
+    const cleaned = normalized.replace(/^(-?)0+(\d)/, '$1$2');
+    setRaw(cleaned);
+    const parsed = Number(cleaned);
+    if (!Number.isNaN(parsed)) {
+      onChange(parsed);
+    }
+  };
+
+  return (
+    <div className="relative flex items-center w-full">
+      <input
+        type="text"
+        inputMode="decimal"
+        aria-label={ariaLabel}
+        readOnly={readOnly}
+        disabled={disabled}
+        required={required}
+        min={min}
+        max={max}
+        step={step}
+        placeholder={placeholder}
+        value={focused ? raw : value === undefined ? '' : String(value)}
+        onFocus={() => {
+          setFocused(true);
+          setRaw(Number(value) === 0 ? '' : String(value ?? ''));
+        }}
+        onBlur={() => {
+          setFocused(false);
+          if (raw === '' || raw === '-') {
+            const fallback = min && min > 0 ? min : 0;
+            setRaw(String(fallback));
+            onChange(fallback);
+          }
+        }}
+        onChange={(e) => handleChange(e.target.value)}
+        className={`w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs sm:text-sm tabular-nums text-slate-900 outline-none transition-colors focus:border-brand-600 focus:ring-2 focus:ring-brand-100 disabled:bg-slate-50 disabled:text-slate-400 ${suffix ? 'pr-8' : ''} ${className}`}
+      />
+      {suffix && (
+        <span className="pointer-events-none absolute right-2.5 text-xs font-semibold text-slate-400">
+          {suffix}
+        </span>
+      )}
+    </div>
+  );
+}
+
 const FOCUSABLE_SELECTOR = 'a[href], area[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"]), [contenteditable="true"]';
 const openDialogStack: HTMLElement[] = [];
 let previousBodyOverflow = '';
@@ -253,8 +477,12 @@ export function RecordModal({ title, fields, initial = {}, submitLabel, onClose,
                       {uploading === field.name && <p className="mt-1 text-xs text-slate-500">{isEn ? 'Uploading file…' : 'Đang tải tệp…'}</p>}
                       {values[field.name] && <p className="mt-1 truncate text-xs text-emerald-700">{isEn ? 'Attachment: ' : 'Chứng từ: '}{values[field.name]}</p>}
                     </div>
+                  ) : field.type === 'number' && isMoneyField(field.name) ? (
+                    <MoneyInput ariaLabel={field.label} readOnly={field.readOnly} required={field.required} placeholder={field.placeholder || '0'} value={displayValues[field.name]} onChange={(num) => setValues((prev) => ({ ...prev, [field.name]: String(num) }))} />
+                  ) : field.type === 'number' ? (
+                    <SmartNumberInput ariaLabel={field.label} readOnly={field.readOnly} required={field.required} min={field.min} max={field.max} placeholder={field.placeholder || '0'} value={displayValues[field.name]} onChange={(num) => setValues((prev) => ({ ...prev, [field.name]: String(num) }))} />
                   ) : (
-                    <input step={field.type === 'number' ? 'any' : undefined} readOnly={field.readOnly} type={field.type || 'text'} required={field.required} min={field.min} max={field.max} value={displayValues[field.name] || ''} placeholder={field.placeholder} onChange={(e) => setValues((prev) => ({ ...prev, [field.name]: e.target.value }))} className="w-full rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs sm:text-sm outline-none focus:border-brand-500" />
+                    <input readOnly={field.readOnly} type={field.type || 'text'} required={field.required} min={field.min} max={field.max} value={displayValues[field.name] || ''} placeholder={field.placeholder} onChange={(e) => setValues((prev) => ({ ...prev, [field.name]: e.target.value }))} className="w-full rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs sm:text-sm outline-none focus:border-brand-500" />
                   )}
                 </label>
               ))}

@@ -27,7 +27,19 @@ const classificationOptions = Object.entries(classificationNames).map(([value, l
 const directionOptions = [{ value: 'INCOME', label: 'Thu tiền' }, { value: 'EXPENSE', label: 'Chi tiền' }];
 function useRows(entity: string) {
   const [rows, setRows] = useState<Row[]>([]); const [loading, setLoading] = useState(true); const [error, setError] = useState('');
-  const reload = useCallback(async () => { setLoading(true); setError(''); try { setRows(await getRecords<Row>(entity)); } catch (reason) { setError(messageOf(reason)); } finally { setLoading(false); } }, [entity]);
+  const loadedRef = useRef(false);
+  const reload = useCallback(async () => {
+    if (!loadedRef.current) setLoading(true);
+    setError('');
+    try {
+      setRows(await getRecords<Row>(entity));
+      loadedRef.current = true;
+    } catch (reason) {
+      setError(messageOf(reason));
+    } finally {
+      setLoading(false);
+    }
+  }, [entity]);
   useEffect(() => { void reload(); const changed = () => { void reload(); }; window.addEventListener('fintax:records-changed', changed); return () => window.removeEventListener('fintax:records-changed', changed); }, [reload]);
   const hasPendingOdooSync = rows.some((row) => ['PENDING_ODOO', 'PENDING', 'PROCESSING'].includes(String(row.syncStatus || '')));
   useEffect(() => {
@@ -70,7 +82,7 @@ function ResourcePage({ entity, title, columns, fields, actions, toolbar, rowExt
   useEffect(() => { const view = params.get('view'); if (view && view !== openedView && !loading) { const match = rows.find((row) => (!fixedType || row.direction === fixedType || row.type === fixedType) && (row.code === view || row.id === view)); if (match) { setDetail(match); setOpenedView(view); } } }, [params,rows,loading,openedView]);
   const save = async (value: Record<string, unknown>) => {
     setBusy(true);
-    try { if (editing) await updateRecord(entity, editing.id, value); else await createRecord(entity, { ...value, ...(fixedType ? { type: fixedType, direction: fixedType } : {}) }); closeEditor(); toast(isEn ? 'Record saved successfully.' : 'Đã lưu giấy tờ.'); await reload(); window.dispatchEvent(new Event('fintax:records-changed')); }
+    try { if (editing) await updateRecord(entity, editing.id, value); else await createRecord(entity, { ...value, ...(fixedType ? { type: fixedType, direction: fixedType } : {}) }); closeEditor(); toast(isEn ? 'Record saved successfully.' : 'Đã lưu giấy tờ.'); window.dispatchEvent(new Event('fintax:records-changed')); }
     catch (error) { throw new Error(messageOf(error)); } finally { setBusy(false); }
   };
   const perform = async (row: Row, item: Action, note = '') => {
@@ -190,7 +202,8 @@ export function TransactionsPage() {
 const quoteActions = (row: Row, role: string): Action[] => {
   if (['OWNER', 'ACCOUNTANT'].includes(role) && ['REJECTED', 'APPROVED', 'SENT'].includes(row.status || '')) return [{ label: 'Tạo phiên bản mới', action: 'revise', variant: 'secondary' }, ...(row.status === 'APPROVED' ? [{ label: 'Đã gửi khách', action: 'mark-sent' }] : row.status === 'SENT' ? [{ label: 'Khách đã chấp nhận', action: 'accept' }] : [])] as Action[];
   if (role === 'OWNER' && row.status === 'PENDING_APPROVAL') return [{ label: 'Duyệt', action: 'approve', variant: 'primary' }, { label: 'Từ chối', action: 'reject' }];
-  if (['OWNER', 'ACCOUNTANT'].includes(role) && row.status === 'DRAFT') return [{ label: 'Gửi duyệt', action: 'submit-for-approval', variant: 'primary' }];
+  if (role === 'OWNER' && row.status === 'DRAFT') return [{ label: 'Duyệt ngay', action: 'approve', variant: 'primary' }];
+  if (role === 'ACCOUNTANT' && row.status === 'DRAFT') return [{ label: 'Gửi duyệt', action: 'submit-for-approval', variant: 'primary' }];
   if (['OWNER', 'ACCOUNTANT'].includes(role) && row.status === 'APPROVED') return [{ label: 'Đánh dấu đã gửi khách', action: 'mark-sent', variant: 'primary' }];
   if (['OWNER', 'ACCOUNTANT'].includes(role) && row.status === 'SENT') return [{ label: 'Khách đã chấp nhận', action: 'accept', variant: 'primary' }];
   if (['OWNER', 'ACCOUNTANT'].includes(role) && row.status === 'ACCEPTED' && !row.productionOrderId) return [{ label: 'Tạo việc làm', action: 'create-production', variant: 'primary' }];
