@@ -234,14 +234,9 @@ function AppShell() {
               <Menu size={18} />
             </button>
 
-            <Link to="/app" className="flex items-center h-10 px-0 hover:opacity-90 transition-opacity">
+            <Link to="/app" className="flex items-center h-10 px-0 hover:opacity-90 transition-opacity shrink-0">
               <img src="/logo-horizontal.png" alt="DichVuThue FinTax Automation" className="h-8 w-auto max-w-[165px] sm:max-w-[185px] object-contain" />
             </Link>
-
-            <div className="hidden sm:flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-0.5 text-[11px] text-slate-600">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              <span className="max-w-28 truncate font-medium">{user?.workshopName || 'FinTax Automation'}</span>
-            </div>
           </div>
 
           {/* Center: Desktop Top Navigation Groups with Dropdowns */}
@@ -262,7 +257,7 @@ function AppShell() {
                     <button
                       type="button"
                       onClick={() => openNavGroup(isOpen ? null : group.id)}
-                      className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
+                      className={`flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
                         isGroupActive
                           ? 'bg-slate-100 text-brand-700 border-b-2 border-brand-600 shadow-xs'
                           : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
@@ -275,7 +270,7 @@ function AppShell() {
                   ) : (
                     <Link
                       to={group.items[0].to}
-                      className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
+                      className={`flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
                         isGroupActive
                           ? 'bg-slate-100 text-brand-700 border-b-2 border-brand-600 shadow-xs'
                           : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'

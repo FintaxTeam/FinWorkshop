@@ -42,7 +42,7 @@ const roles = {
   ACCOUNTANT: { label: 'Kế toán', entities: ['dashboard', 'branches', 'cash-accounts', 'customers', 'suppliers', 'materials', 'products', 'boms', 'quotations', 'production-orders', 'stock-movements', 'labor-logs', 'transactions', 'invoices', 'payments', 'payment-allocations', 'reconciliations', 'alerts', 'classification-rules', 'tax-rules', 'tax-periods'], actions: ['create', 'update', 'read', 'submit-for-approval', 'mark-sent', 'accept', 'create-production', 'simulate-code', 'classify', 'resolve', 'start', 'complete', 'confirm', 'revise', 'unallocate'] },
   WORKSHOP: { label: 'Thợ xưởng', entities: ['production-orders', 'stock-movements', 'materials', 'labor-logs'], actions: ['read', 'start', 'complete', 'progress', 'record-movement', 'record-labor'] },
 };
-roles.ACCOUNTANT.actions.push('receive-finished');
+roles.ACCOUNTANT.actions.push('receive-finished', 'reject');
 roles.WAREHOUSE = { label: 'Thủ kho', entities: ['production-orders','stock-movements','materials','products'], actions: ['read','record-movement','receive-finished'] };
 const tenantPermissions = new Map();
 function permissionsFor(role, wid = DEFAULT_WORKSHOP_ID) { return tenantPermissions.get(`${wid}:${role}`) || { entities: roles[role]?.entities || [], actions: roles[role]?.actions || [] }; }
@@ -1380,12 +1380,13 @@ app.post('/api/:entity/:id/actions/:action', requireAuth, requireEntity, async (
     after.approvedAt = new Date().toISOString();
     after.approvedBy = req.user.name;
   }
-  else if (action === 'reject' && entity === 'quotations' && req.user.role === 'OWNER' && before.status === 'PENDING_APPROVAL') {
+  else if (action === 'reject' && entity === 'quotations' && ((req.user.role === 'OWNER' && before.status === 'PENDING_APPROVAL') || (['OWNER', 'ACCOUNTANT'].includes(req.user.role) && before.status === 'SENT'))) {
     if (!String(req.body?.note || '').trim()) throw businessError('Bắt buộc nhập lý do từ chối.');
     after.status = 'REJECTED';
     after.rejectionNote = String(req.body?.note || '');
     after.rejectedAt = new Date().toISOString();
     after.rejectedBy = req.user.name;
+    after.rejectionSource = before.status === 'SENT' ? 'CUSTOMER' : 'INTERNAL';
   }
   else if (action === 'mark-sent' && entity === 'quotations' && ['OWNER', 'ACCOUNTANT'].includes(req.user.role) && before.status === 'APPROVED') { after.status = 'SENT'; after.sentAt = new Date().toISOString(); }
   else if (action === 'accept' && entity === 'quotations' && ['OWNER', 'ACCOUNTANT'].includes(req.user.role) && before.status === 'SENT') { after.status = 'ACCEPTED'; after.acceptedAt = new Date().toISOString(); }

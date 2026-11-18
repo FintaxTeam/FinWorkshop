@@ -220,7 +220,7 @@ export function TransactionsPage() {
 
 const quoteActions = (row: Row, role: string): Action[] => {
   if (['OWNER', 'ACCOUNTANT'].includes(role) && row.status === 'APPROVED') return [{ label: 'Đã gửi khách', action: 'mark-sent', variant: 'primary' }, { label: 'Tạo phiên bản mới', action: 'revise', variant: 'secondary' }];
-  if (['OWNER', 'ACCOUNTANT'].includes(role) && row.status === 'SENT') return [{ label: 'Khách đã chấp nhận', action: 'accept', variant: 'primary' }, { label: 'Tạo phiên bản mới', action: 'revise', variant: 'secondary' }];
+  if (['OWNER', 'ACCOUNTANT'].includes(role) && row.status === 'SENT') return [{ label: 'Khách đã chấp nhận', action: 'accept', variant: 'primary' }, { label: 'Khách từ chối', action: 'reject', variant: 'secondary' }, { label: 'Tạo phiên bản mới', action: 'revise', variant: 'secondary' }];
   if (['OWNER', 'ACCOUNTANT'].includes(role) && row.status === 'REJECTED') return [{ label: 'Tạo phiên bản mới', action: 'revise', variant: 'secondary' }];
   if (role === 'OWNER' && row.status === 'PENDING_APPROVAL') return [{ label: 'Duyệt', action: 'approve', variant: 'primary' }, { label: 'Từ chối', action: 'reject' }];
   if (role === 'ACCOUNTANT' && row.status === 'DRAFT') return [{ label: 'Gửi duyệt', action: 'submit-for-approval', variant: 'primary' }];

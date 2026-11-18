@@ -334,7 +334,7 @@ export function QuotationModal({initial={},onClose,onSubmit}:FormProps){
     title={initial.id?`Sửa báo giá · v${initial.version||1}`:'Lập báo giá khách hàng'}
     onClose={onClose}
     onSubmit={() => handleSave(user?.role === 'OWNER' ? 'APPROVE' : 'SUBMIT')}
-    submitLabel={user?.role === 'OWNER' ? 'Lưu & Duyệt báo giá' : 'Lưu & Gửi duyệt ngay'}
+    submitLabel={user?.role === 'OWNER' ? 'Lưu' : 'Lưu & Gửi duyệt ngay'}
     secondarySubmitLabel={user?.role !== 'OWNER' ? 'Lưu bản nháp' : undefined}
     onSecondarySubmit={user?.role !== 'OWNER' ? () => handleSave('DRAFT') : undefined}
   >
@@ -383,7 +383,10 @@ export function QuotationModal({initial={},onClose,onSubmit}:FormProps){
       <div className="space-y-3">
         {lines.map((line, idx) => {
           const { baseCost, suggested } = calcLineSuggested(line);
-          const availableBoms = boms.filter(b=>!line.productId || b.productId===line.productId);
+          const availableBoms = line.productId
+            ? boms.filter(b=>b.productId===line.productId || (line.name && b.productName===line.name))
+            : [];
+          const hasBom = availableBoms.length > 0;
           const selectedRule = rules.find(r=>r.id===line.taxRuleId);
           const lineTotal = Math.round(Number(line.quantity||0) * (Number(line.unitPrice)||suggested||0));
 
@@ -484,14 +487,15 @@ export function QuotationModal({initial={},onClose,onSubmit}:FormProps){
                 </div>
 
                 <div className="sm:col-span-4">
-                  <Field label="Định mức sản xuất (BOM)">
+                  <Field label="Định mức sản xuất">
                     <select
-                      aria-label={`Công thức BOM dòng ${idx+1}`}
+                      aria-label={`Định mức sản xuất dòng ${idx+1}`}
                       className={input}
-                      value={line.bomId||''}
+                      disabled={!hasBom}
+                      value={hasBom ? (line.bomId||'') : ''}
                       onChange={e=>selectBomOnLine(idx, e.target.value)}
                     >
-                      <option value="">Không dùng định mức BOM</option>
+                      <option value="">{hasBom ? 'Không dùng' : 'Không có'}</option>
                       {availableBoms.map(b=><option key={b.id} value={b.id}>{b.code||b.productName} · v{b.version}</option>)}
                     </select>
                   </Field>
