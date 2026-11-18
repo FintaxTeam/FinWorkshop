@@ -88,6 +88,16 @@ services:
       - "5173:80"
       - "8080:80"
 
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: fintax-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    depends_on:
+      - web-client
+
 volumes:
   odoo-postgres-data:
   odoo-web-data:

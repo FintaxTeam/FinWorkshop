@@ -2,18 +2,7 @@ import axios from 'axios';
 
 const getBaseUrl = () => {
   if (typeof window !== 'undefined') {
-    const params = new URLSearchParams(window.location.search);
-    const apiParam = params.get('api');
-    if (apiParam) {
-      localStorage.setItem('fintax_api_url', apiParam);
-      return apiParam;
-    }
-    const cached = localStorage.getItem('fintax_api_url');
-    if (cached) return cached;
-
-    if (window.location.origin.includes('fintaxauto.space')) {
-      return '/api';
-    }
+    localStorage.removeItem('fintax_api_url');
     return '/api';
   }
   return import.meta.env.VITE_API_URL || '/api';
