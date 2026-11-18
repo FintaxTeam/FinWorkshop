@@ -16,13 +16,15 @@ api.interceptors.response.use((response) => response, (error) => {
   return Promise.reject(error);
 });
 
-export type Role = 'OWNER' | 'ACCOUNTANT' | 'WAREHOUSE' | 'WORKSHOP';
+export type Role = 'ADMIN' | 'OWNER' | 'ACCOUNTANT' | 'WAREHOUSE' | 'WORKSHOP';
 export type User = {
   id: string;
   email: string;
   name: string;
   role: Role;
   roleLabel: string;
+  isAdmin?: boolean;
+  isOwner?: boolean;
   workshopId?: string;
   workshopName?: string;
   permissions?: { entities: string[] | '*'; actions: string[] | '*' };

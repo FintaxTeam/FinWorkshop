@@ -319,6 +319,16 @@ function AppShell() {
 
           {/* Right: Quick Search, Language Switcher, User Profile, Role */}
           <div className="flex items-center gap-2 sm:gap-2.5">
+            {(user?.role === 'ADMIN' || user?.isAdmin) && (
+              <Link
+                to="/admin"
+                className="hidden sm:inline-flex items-center gap-1 rounded-lg border border-brand-200 bg-brand-50/90 px-2.5 py-1 text-xs font-semibold text-brand-700 hover:bg-brand-100 transition-colors shadow-2xs"
+                title="Chuyển sang Trang Quản trị Web dành cho Chủ web"
+              >
+                <ShieldCheck size={13} />
+                <span>{isEn ? 'Web Admin' : 'Trang Chủ Web'}</span>
+              </Link>
+            )}
             <div className={`flex items-center overflow-hidden transition-all duration-150 ${searchOpen ? 'w-40 sm:w-56' : 'w-0'}`}>
               <form onSubmit={search} className="relative w-full">
                 <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -406,13 +416,22 @@ function AppShell() {
               </button>
 
               {profileOpen && (
-                <div className="absolute right-0 top-10 z-50 w-52 rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl text-slate-800">
+                <div className="absolute right-0 top-10 z-50 w-56 rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl text-slate-800">
                   <div className="border-b border-slate-100 px-3 py-2">
                     <p className="truncate text-xs font-semibold text-slate-900">{user?.email}</p>
                     <p className="text-[10px] text-brand-700 font-medium">{user?.roleLabel}</p>
                   </div>
+                  {(user?.role === 'ADMIN' || user?.isAdmin) && (
+                    <Link
+                      to="/admin"
+                      className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold text-brand-700 bg-brand-50/80 hover:bg-brand-100 transition-colors border-b border-slate-100"
+                    >
+                      <ShieldCheck size={13} className="text-brand-700" />
+                      <span>{isEn ? 'Web Admin Portal' : 'Trang Quản trị Web (Chủ web)'}</span>
+                    </Link>
+                  )}
                   <a
-                    href="http://localhost:3001/api-docs"
+                    href="/api-docs/"
                     target="_blank"
                     rel="noopener noreferrer"
                     className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 transition-colors border-b border-slate-100"

@@ -38,7 +38,8 @@ const jwtSecret = process.env.JWT_SECRET || 'local-development-secret-change-me'
 const taxApiUrl = process.env.TAX_API_URL || 'http://127.0.0.1:4000';
 const allowedEntities = new Set(['dashboard', 'branches', 'cash-accounts', 'customers', 'suppliers', 'materials', 'products', 'boms', 'quotations', 'production-orders', 'stock-movements', 'labor-logs', 'transactions', 'invoices', 'payments', 'payment-allocations', 'reconciliations', 'alerts', 'classification-rules', 'tax-rules', 'tax-periods', 'opening-balances']);
 const roles = {
-  OWNER: { label: 'Chủ doanh nghiệp', entities: '*', actions: '*' },
+  ADMIN: { label: 'Quản trị viên Website (Chủ web)', entities: '*', actions: '*' },
+  OWNER: { label: 'Chủ doanh nghiệp (Chủ xưởng)', entities: '*', actions: '*' },
   ACCOUNTANT: { label: 'Kế toán', entities: ['dashboard', 'branches', 'cash-accounts', 'customers', 'suppliers', 'materials', 'products', 'boms', 'quotations', 'production-orders', 'stock-movements', 'labor-logs', 'transactions', 'invoices', 'payments', 'payment-allocations', 'reconciliations', 'alerts', 'classification-rules', 'tax-rules', 'tax-periods'], actions: ['create', 'update', 'read', 'submit-for-approval', 'mark-sent', 'accept', 'create-production', 'simulate-code', 'classify', 'resolve', 'start', 'complete', 'confirm', 'revise', 'unallocate'] },
   WORKSHOP: { label: 'Thợ xưởng', entities: ['production-orders', 'stock-movements', 'materials', 'labor-logs'], actions: ['read', 'start', 'complete', 'progress', 'record-movement', 'record-labor'] },
 };
@@ -54,7 +55,6 @@ app.use((req, res, next) => {
   return helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } })(req, res, next);
 });
 app.use(cors({ origin: true, credentials: true }));
-app.use('/api/website', createWebsiteRouter());
 app.use(express.json({ limit: '8mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 setupSwagger(app);
@@ -68,6 +68,8 @@ const userView = (user) => ({
   name: user.full_name,
   role: user.role,
   roleLabel: roles[user.role]?.label || user.role,
+  isAdmin: user.role === 'ADMIN' || user.email?.startsWith('admin@') || user.email === 'dvu150906@gmail.com',
+  isOwner: user.role === 'OWNER',
   workshopId: user.workshop_id || DEFAULT_WORKSHOP_ID,
   workshopName: user.workshop_name || DEFAULT_WORKSHOP_NAME,
   permissions: permissionsFor(user.role, user.workshop_id),
@@ -84,16 +86,35 @@ async function requireAuth(req, res, next) {
   const token = req.headers.authorization?.replace(/^Bearer\s+/i, '');
   if (!token) return res.status(401).json({ error: 'Vui lòng đăng nhập để tiếp tục.' });
   try { req.user = jwt.verify(token, jwtSecret); } catch { return res.status(401).json({ error: 'Phiên đăng nhập hết hạn.' }); }
-  try { const [users] = await getPool().query('SELECT active, role, token_version FROM users WHERE id = ? AND workshop_id = ?', [req.user.id, req.user.workshopId || DEFAULT_WORKSHOP_ID]); if (!users[0]?.active || users[0].role !== req.user.role) return res.status(401).json({ error: 'Tài khoản đã bị khóa hoặc quyền đã thay đổi.' }); if (req.user.tokenVersion !== undefined && Number(users[0].token_version || 1) !== Number(req.user.tokenVersion)) return res.status(401).json({ error: 'Phiên đăng nhập đã hết hiệu lực. Vui lòng đăng nhập lại.' }); const wid = req.user.workshopId || DEFAULT_WORKSHOP_ID;
+  try {
+    const [users] = await getPool().query('SELECT active, role, token_version, workshop_id FROM users WHERE id = ?', [req.user.id]);
+    if (!users[0]?.active || users[0].role !== req.user.role) return res.status(401).json({ error: 'Tài khoản đã bị khóa hoặc quyền đã thay đổi.' });
+    if (req.user.tokenVersion !== undefined && Number(users[0].token_version || 1) !== Number(req.user.tokenVersion)) return res.status(401).json({ error: 'Phiên đăng nhập đã hết hiệu lực. Vui lòng đăng nhập lại.' });
+    const wid = req.user.workshopId || users[0].workshop_id || DEFAULT_WORKSHOP_ID;
     const [permissions] = await getPool().query('SELECT entities, actions FROM workshop_role_permissions WHERE workshop_id = ? AND role = ?', [wid, req.user.role]);
     if (permissions[0] && roleCaps[req.user.role]) tenantPermissions.set(`${wid}:${req.user.role}`, { entities: decodeData(permissions[0].entities).filter(item => roleCaps[req.user.role].entities.includes(item)), actions: decodeData(permissions[0].actions).filter(item => roleCaps[req.user.role].actions.includes(item)) });
-    req.user.roleLabel=roles[req.user.role]?.label; req.user.permissions = permissionsFor(req.user.role, wid); next(); }
+    req.user.roleLabel = roles[req.user.role]?.label || req.user.role;
+    req.user.isAdmin = req.user.role === 'ADMIN' || req.user.email?.startsWith('admin@') || req.user.email === 'dvu150906@gmail.com';
+    req.user.isOwner = req.user.role === 'OWNER';
+    req.user.permissions = permissionsFor(req.user.role, wid);
+    next();
+  }
   catch (error) { next(error); }
 }
+
 function requireOwner(req, res, next) {
-  if (req.user?.role !== 'OWNER') return res.status(403).json({ error: 'Bạn không có quyền thực hiện thao tác này.' });
+  if (req.user?.role !== 'OWNER' && req.user?.role !== 'ADMIN' && !req.user?.isAdmin) return res.status(403).json({ error: 'Bạn không có quyền thực hiện thao tác này.' });
   next();
 }
+
+function requireAdmin(req, res, next) {
+  if (req.user?.role !== 'ADMIN' && req.user?.role !== 'OWNER' && !req.user?.isAdmin) {
+    return res.status(403).json({ error: 'Chỉ dành cho Quản trị viên Website (Chủ web).' });
+  }
+  next();
+}
+
+app.use('/api/website', createWebsiteRouter({ requireAuth, requireAdmin }));
 function canEntity(subject, entity) {
   const permission = typeof subject === 'string' ? roles[subject] : subject.permissions || permissionsFor(subject.role, subject.workshopId);
   return permission && (permission.entities === '*' || permission.entities.includes(entity));
@@ -937,6 +958,134 @@ app.post('/api/integrations/odoo/sync-pending', requireAuth, requireOwner, async
 });
 
 app.get('/api/audit-logs', requireAuth, requireOwner, async (req, res) => res.json(await listAudit(req.user.workshopId || DEFAULT_WORKSHOP_ID, Math.min(100000, Math.max(1, Number(req.query.limit || 100000))))));
+
+// ==========================================
+// ADMIN PORTAL ENDPOINTS (DÀNH CHO CHỦ WEB)
+// ==========================================
+app.get('/api/admin/system/status', requireAuth, requireAdmin, async (_req, res, next) => {
+  try {
+    const odoo = await odooStatus().catch(() => ({ connected: false, label: 'Lỗi kiểm tra Odoo' }));
+    
+    // Check DB
+    let dbStatus = 'CONNECTED';
+    let dbLatencyMs = 0;
+    try {
+      const start = Date.now();
+      await getPool().query('SELECT 1');
+      dbLatencyMs = Date.now() - start;
+    } catch {
+      dbStatus = 'DISCONNECTED';
+    }
+
+    // Check Mock Tax
+    let mockTaxStatus = 'UNKNOWN';
+    try {
+      const resp = await axios.get(`${process.env.TAX_API_URL || 'http://mock-tax-api:4000'}/health`, { timeout: 3000 });
+      mockTaxStatus = resp.status === 200 ? 'ONLINE' : 'DEGRADED';
+    } catch {
+      mockTaxStatus = 'OFFLINE';
+    }
+
+    // Counts
+    const [workshopCount] = await getPool().query('SELECT COUNT(*)::int as count FROM workshops');
+    const [userCount] = await getPool().query('SELECT COUNT(*)::int as count FROM users');
+    const [inquiryCount] = await getPool().query(`
+      SELECT 
+        COUNT(*)::int as total,
+        COUNT(CASE WHEN status = 'NEW' THEN 1 END)::int as new_count
+      FROM website_inquiries
+    `);
+
+    res.json({
+      uptimeSeconds: Math.floor(process.uptime()),
+      nodeVersion: process.version,
+      memory: process.memoryUsage(),
+      environment: process.env.NODE_ENV || 'production',
+      database: {
+        status: dbStatus,
+        latencyMs: dbLatencyMs,
+        name: process.env.DB_NAME || 'finworkshop',
+      },
+      odoo,
+      mockTax: {
+        status: mockTaxStatus,
+        url: process.env.TAX_API_URL || 'http://mock-tax-api:4000',
+      },
+      counts: {
+        workshops: Number(workshopCount[0]?.count || 0),
+        users: Number(userCount[0]?.count || 0),
+        inquiries: Number(inquiryCount[0]?.total || 0),
+        newInquiries: Number(inquiryCount[0]?.new_count || 0),
+      },
+      services: [
+        { name: 'Swagger API Documentation', url: '/api-docs/', status: 'ONLINE', badge: 'Tài liệu API' },
+        { name: 'Odoo 16 ERP Platform', url: 'http://odoo:8069', status: odoo.connected ? 'ONLINE' : 'OFFLINE', badge: 'ERP Core' },
+        { name: 'Mock Tax Portal (Cổng Thuế Giả Lập)', url: 'http://localhost:4000', status: mockTaxStatus, badge: 'Hóa đơn & CQT' },
+        { name: 'PostgreSQL Database', status: dbStatus, badge: 'Cơ sở dữ liệu' },
+        { name: 'Cloudflare Zero Trust Tunnel', url: 'https://fintaxauto.space', status: 'ONLINE', badge: 'Domain & SSL' },
+      ],
+    });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/admin/workshops', requireAuth, requireAdmin, async (_req, res, next) => {
+  try {
+    const [workshops] = await getPool().query(`
+      SELECT 
+        w.id, w.name, w.code, w.tax_id, w.active, w.created_at, w.updated_at,
+        COUNT(u.id)::int as member_count
+      FROM workshops w
+      LEFT JOIN users u ON u.workshop_id = w.id
+      GROUP BY w.id
+      ORDER BY w.created_at DESC
+    `);
+    res.json(workshops);
+  } catch (error) { next(error); }
+});
+
+app.get('/api/admin/users', requireAuth, requireAdmin, async (_req, res, next) => {
+  try {
+    const [users] = await getPool().query(`
+      SELECT 
+        u.id, u.email, u.full_name as name, u.role, u.active, u.created_at, u.workshop_id,
+        w.name as workshop_name
+      FROM users u
+      LEFT JOIN workshops w ON w.id = u.workshop_id
+      ORDER BY u.created_at DESC
+    `);
+    res.json(users.map(u => ({
+      ...u,
+      roleLabel: roles[u.role]?.label || u.role
+    })));
+  } catch (error) { next(error); }
+});
+
+app.patch('/api/admin/users/:id/role', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { role } = req.body || {};
+    if (!roles[role]) return res.status(400).json({ error: 'Vai trò không hợp lệ.' });
+    await getPool().query('UPDATE users SET role = $1, updated_at = NOW() WHERE id = $2', [role, req.params.id]);
+    res.json({ ok: true, message: 'Đã cập nhật vai trò người dùng.' });
+  } catch (error) { next(error); }
+});
+
+app.patch('/api/admin/users/:id/status', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { active } = req.body || {};
+    await getPool().query('UPDATE users SET active = $1, updated_at = NOW() WHERE id = $2', [Boolean(active), req.params.id]);
+    res.json({ ok: true, message: active ? 'Đã kích hoạt tài khoản.' : 'Đã khóa tài khoản.' });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/admin/users/:id/reset-password', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { newPassword } = req.body || {};
+    if (!newPassword || newPassword.length < 8) return res.status(400).json({ error: 'Mật khẩu cần ít nhất 8 ký tự.' });
+    const hash = await bcrypt.hash(newPassword, 10);
+    await getPool().query('UPDATE users SET password_hash = $1, token_version = token_version + 1, updated_at = NOW() WHERE id = $2', [hash, req.params.id]);
+    res.json({ ok: true, message: 'Đã đặt lại mật khẩu cho người dùng thành công.' });
+  } catch (error) { next(error); }
+});
 
 app.post('/api/transfers', requireAuth, async (req, res) => {
   if (req.user.role === 'WORKSHOP') return res.status(403).json({ error: 'Vai trò hiện tại không được ghi nhận chuyển tiền.' });

@@ -5,6 +5,7 @@ import {ToastProvider} from './components';
 import LandingPage from './LandingPage';
 import MarketingLayout from './marketing/MarketingLayout';
 const Portal=lazy(()=>import('./Portal'));
+const AdminPortal=lazy(()=>import('./AdminPortal'));
 const MarketingPage=lazy(()=>import('./marketing/MarketingPages'));
 const publicPages: Record<string,string> = {
   '/san-pham':'san-pham', '/giai-phap/san-xuat':'giai-phap-san-xuat',
@@ -24,6 +25,7 @@ export default function App(){
       {Object.entries(publicPages).map(([path,page])=><Route key={path} path={path} element={<MarketingLayout><MarketingPage page={page}/></MarketingLayout>}/>)}
       <Route path="/login" element={<LoginPage/>}/><Route path="/register" element={<RegisterPage/>}/>
       <Route path="/forgot-password" element={<ForgotPasswordPage/>}/><Route path="/reset-password" element={<ResetPasswordPage/>}/>
+      <Route path="/admin/*" element={<AdminPortal/>}/>
       <Route path="/*" element={<Portal/>}/>
     </Routes>
   </Suspense></ToastProvider>;

@@ -43,12 +43,18 @@ export function LoginPage() {
   if (user) return <Navigate to={destination} replace />;
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setError(''); setBusy(true);
-    try { await login(email, password); navigate(destination, { replace: true }); }
+    try {
+      await login(email, password);
+      const isAdminAccount = email.trim().toLowerCase().startsWith('admin@') || email.trim().toLowerCase() === 'dvu150906@gmail.com';
+      const finalDest = (!loginParams.get('next') && !location.state?.from && isAdminAccount) ? '/admin' : destination;
+      navigate(finalDest, { replace: true });
+    }
     catch (reason) { setError(messageOf(reason)); }
     finally { setBusy(false); }
   };
   const demos = [
-    { email: 'owner.workflow@fintax.demo', label: 'Chủ xưởng', desc: 'Xem tất cả, duyệt và theo dõi tiền', icon: <ShieldCheck size={15} /> },
+    { email: 'admin@fintaxauto.space', label: 'Chủ web (Admin)', desc: 'Quản lý website, tư vấn khách & công cụ hệ thống', icon: <ShieldCheck size={15} /> },
+    { email: 'owner.workflow@fintax.demo', label: 'Chủ xưởng (Doanh nghiệp)', desc: 'Xem tất cả, duyệt hóa đơn và theo dõi xưởng', icon: <ShieldCheck size={15} /> },
     { email: 'accountant.workflow@fintax.demo', label: 'Kế toán', desc: 'Hóa đơn, thu chi, thuế', icon: <FileText size={15} /> },
     { email:'warehouse.workflow@fintax.demo',label:'Thủ kho', desc: 'Quản lý vật tư trong kho',icon:<Factory size={15}/> },
     { email: 'workshop.workflow@fintax.demo', label: 'Thợ xưởng', desc: 'Xem việc, ghi giờ công và vật tư', icon: <Factory size={15} /> },

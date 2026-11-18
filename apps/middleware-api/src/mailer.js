@@ -60,3 +60,37 @@ export async function sendResetCodeEmail({ to, code, expiresInMinutes = 10 }) {
   }
   return true;
 }
+
+export async function sendCustomEmail({ to, subject, text, html }) {
+  const config = smtpConfig();
+  if (!config.user || !config.password) {
+    return { ok: false, reason: 'SMTP_NOT_CONFIGURED', note: 'Email lưu lại trong hệ thống (chưa phát đi vì chưa cấu hình SMTP Gmail).' };
+  }
+
+  try {
+    const transport = nodemailer.createTransport({
+      host: config.host,
+      port: config.port,
+      secure: config.secure,
+      requireTLS: !config.secure,
+      auth: { user: config.user, pass: config.password },
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 15_000,
+      tls: { minVersion: 'TLSv1.2' },
+    });
+
+    const info = await transport.sendMail({
+      from: config.from,
+      to,
+      subject,
+      text: text || (html ? html.replace(/<[^>]*>?/gm, '') : ''),
+      html: html || `<div style="font-family:Arial,sans-serif;line-height:1.6;color:#242424"><p>${text}</p></div>`,
+    });
+
+    const accepted = info.accepted?.some((address) => address.toLowerCase() === to.toLowerCase());
+    return { ok: accepted, messageId: info.messageId };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}

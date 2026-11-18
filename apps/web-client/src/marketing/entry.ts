@@ -1,5 +1,5 @@
 const appPaths = new Set([
-  '/app', '/transactions', '/payments', '/reconciliation', '/invoices',
+  '/admin', '/app', '/transactions', '/payments', '/reconciliation', '/invoices',
   '/reports', '/quotations', '/catalog', '/workshop', '/inventory',
   '/customers', '/suppliers', '/settings',
 ]);
