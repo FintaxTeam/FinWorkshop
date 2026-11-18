@@ -44,7 +44,7 @@ export function TaxPortalBridgeModal({
     invoices: Row[];
   }>({
     portalOnline: false,
-    portalUrl: 'http://localhost:4000',
+    portalUrl: '/tax-portal',
     workshopName: 'Xưởng Sản Xuất FinWorkshop',
     workshopTaxCode: '0316890123',
     taxHistory: [],
@@ -281,13 +281,13 @@ export function TaxPortalBridgeModal({
 
           <div className="flex items-center gap-2">
             <a
-              href={overview.portalUrl}
+              href="/tax-portal/"
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100 transition-colors"
             >
               <ExternalLink size={13} />
-              <span>Mở Web Cổng Thuế (:4000)</span>
+              <span>Mở Cổng Thuế Giả Lập (CQT)</span>
             </a>
             <Button variant="secondary" compact onClick={() => void loadOverview()} disabled={loading}>
               <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />

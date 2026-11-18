@@ -915,7 +915,7 @@ app.get('/api/tax-portal/overview', requireAuth, async (req, res) => {
     .slice(0, 30);
   res.json({
     portalOnline,
-    portalUrl: taxApiUrl.replace('127.0.0.1', 'localhost'),
+    portalUrl: '/tax-portal',
     workshopName: workshop?.name || req.user?.workshopName || DEFAULT_WORKSHOP_NAME,
     workshopTaxCode: workshop?.tax_id || '0316890123',
     taxHistory,
@@ -1019,8 +1019,8 @@ app.get('/api/admin/system/status', requireAuth, requireAdmin, async (_req, res,
       },
       services: [
         { name: 'Swagger API Documentation', url: '/api-docs/', status: 'ONLINE', badge: 'Tài liệu API' },
-        { name: 'Odoo 16 ERP Platform', url: 'http://odoo:8069', status: odoo.connected ? 'ONLINE' : 'OFFLINE', badge: 'ERP Core' },
-        { name: 'Mock Tax Portal (Cổng Thuế Giả Lập)', url: 'http://localhost:4000', status: mockTaxStatus, badge: 'Hóa đơn & CQT' },
+        { name: 'Odoo 16 ERP Platform', url: '/odoo/', status: odoo.connected ? 'ONLINE' : 'OFFLINE', badge: 'ERP Core' },
+        { name: 'Mock Tax Portal (Cổng Thuế Giả Lập)', url: '/tax-portal/', status: mockTaxStatus, badge: 'Hóa đơn & CQT' },
         { name: 'PostgreSQL Database', status: dbStatus, badge: 'Cơ sở dữ liệu' },
         { name: 'Cloudflare Zero Trust Tunnel', url: 'https://fintaxauto.space', status: 'ONLINE', badge: 'Domain & SSL' },
       ],
@@ -1085,6 +1085,403 @@ app.post('/api/admin/users/:id/reset-password', requireAuth, requireAdmin, async
     await getPool().query('UPDATE users SET password_hash = $1, token_version = token_version + 1, updated_at = NOW() WHERE id = $2', [hash, req.params.id]);
     res.json({ ok: true, message: 'Đã đặt lại mật khẩu cho người dùng thành công.' });
   } catch (error) { next(error); }
+});
+
+app.post('/api/admin/workshops', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { name, code, tax_id } = req.body || {};
+    if (!name?.trim()) return res.status(400).json({ error: 'Tên xưởng / doanh nghiệp là bắt buộc.' });
+    const id = randomUUID();
+    const cleanCode = (code || `DN-${id.slice(0, 8)}`).toUpperCase().trim();
+    await getPool().query(
+      'INSERT INTO workshops (id, name, code, tax_id, active, created_at, updated_at) VALUES ($1, $2, $3, $4, true, NOW(), NOW())',
+      [id, name.trim(), cleanCode, tax_id ? tax_id.trim() : null]
+    );
+    await seedWorkshopCatalog(id).catch(() => null);
+    res.status(201).json({ ok: true, message: 'Đã tạo xưởng mới thành công.', workshop: { id, name, code: cleanCode, tax_id } });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/admin/users', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { email, password, full_name, role = 'OWNER', workshop_id } = req.body || {};
+    if (!email?.trim() || !password || !full_name?.trim()) {
+      return res.status(400).json({ error: 'Vui lòng nhập đầy đủ email, mật khẩu và họ tên.' });
+    }
+    if (!roles[role]) return res.status(400).json({ error: 'Vai trò không hợp lệ.' });
+    const normEmail = email.trim().toLowerCase();
+    const [existing] = await getPool().query('SELECT id FROM users WHERE email = $1', [normEmail]);
+    if (existing.length) return res.status(409).json({ error: 'Email này đã tồn tại trong hệ thống.' });
+
+    const id = randomUUID();
+    const hash = await bcrypt.hash(password, 10);
+    const wid = workshop_id || DEFAULT_WORKSHOP_ID;
+    await getPool().query(
+      'INSERT INTO users (id, email, full_name, role, password_hash, workshop_id, active, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, true, NOW(), NOW())',
+      [id, normEmail, full_name.trim(), role, hash, wid]
+    );
+    res.status(201).json({ ok: true, message: 'Đã tạo tài khoản người dùng thành công.' });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/admin/inquiries/:id/convert-to-workshop', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const [inquiries] = await getPool().query('SELECT * FROM website_inquiries WHERE id = $1', [req.params.id]);
+    if (!inquiries.length) return res.status(404).json({ error: 'Không tìm thấy yêu cầu tư vấn.' });
+    const inq = inquiries[0];
+
+    const [existingUser] = await getPool().query('SELECT id FROM users WHERE email = $1', [inq.email]);
+    if (existingUser.length) {
+      return res.status(409).json({ error: `Email ${inq.email} đã có tài khoản trên hệ thống.` });
+    }
+
+    const workshopId = randomUUID();
+    const workshopName = inq.company || `Xưởng ${inq.name}`;
+    const workshopCode = `X-${workshopId.slice(0, 8).toUpperCase()}`;
+    await getPool().query(
+      'INSERT INTO workshops (id, name, code, tax_id, active, created_at, updated_at) VALUES ($1, $2, $3, null, true, NOW(), NOW())',
+      [workshopId, workshopName, workshopCode]
+    );
+    await seedWorkshopCatalog(workshopId).catch(() => null);
+
+    const userId = randomUUID();
+    const tempPassword = req.body?.password || 'FinTax@2026';
+    const hash = await bcrypt.hash(tempPassword, 10);
+    await getPool().query(
+      'INSERT INTO users (id, email, full_name, role, password_hash, workshop_id, active, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, true, NOW(), NOW())',
+      [userId, inq.email.toLowerCase(), inq.name, 'OWNER', hash, workshopId]
+    );
+
+    await getPool().query(`
+      UPDATE website_inquiries 
+      SET status = 'CLOSED', 
+          admin_notes = COALESCE(admin_notes || E'\n', '') || 'Đã chuyển đổi thành Xưởng: ' || $2 || ' (ID: ' || $3 || ')',
+          updated_at = NOW()
+      WHERE id = $1
+    `, [req.params.id, workshopName, workshopId]);
+
+    res.json({
+      ok: true,
+      message: `Đã khởi tạo thành công Xưởng "${workshopName}" và cấp tài khoản Chủ xưởng cho ${inq.email}!`,
+      workshop: { id: workshopId, name: workshopName, code: workshopCode },
+      user: { id: userId, email: inq.email, role: 'OWNER', tempPassword }
+    });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/admin/audit-logs', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const limit = Math.min(100, Math.max(10, Number(req.query.limit || 50)));
+    const [rows] = await getPool().query('SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT $1', [limit]);
+    res.json(rows.map(r => ({
+      id: r.id,
+      actor: typeof r.actor === 'string' ? JSON.parse(r.actor) : r.actor,
+      action: r.action,
+      entity: r.entity,
+      beforeData: typeof r.before_data === 'string' ? JSON.parse(r.before_data) : r.before_data,
+      afterData: typeof r.after_data === 'string' ? JSON.parse(r.after_data) : r.after_data,
+      createdAt: r.created_at,
+    })));
+  } catch (error) { next(error); }
+});
+
+app.post('/api/admin/tax-tools/check-mst', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const mst = String(req.body?.mst || '').trim();
+    if (!mst) return res.status(400).json({ error: 'Vui lòng nhập mã số thuế cần tra cứu.' });
+    const resp = await axios.get(`${process.env.TAX_API_URL || 'http://mock-tax-api:4000'}/api/tax/check-mst/${encodeURIComponent(mst)}`, { timeout: 4000 });
+    res.json(resp.data);
+  } catch (error) {
+    res.status(error.response?.status || 502).json(error.response?.data || { success: false, message: 'Lỗi kết nối Cổng Thuế.' });
+  }
+});
+
+app.post('/api/admin/tax-tools/issue-test-code', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const payload = (req.body && req.body.total) ? req.body : {
+      invoiceId: randomUUID(),
+      invoiceCode: `HD-TEST-${Date.now().toString().slice(-4)}`,
+      total: 5000000,
+      taxAmount: 500000,
+      sellerTaxCode: '0316890123',
+      buyerTaxCode: '0102030405',
+    };
+    const resp = await axios.post(`${process.env.TAX_API_URL || 'http://mock-tax-api:4000'}/api/v1/invoices/issue`, payload, { timeout: 4000 });
+    res.json(resp.data);
+  } catch (error) {
+    res.status(error.response?.status || 502).json(error.response?.data || { success: false, message: 'Lỗi kiểm tra cấp mã.' });
+  }
+});
+
+app.post('/api/admin/integrations/odoo/ping', requireAuth, requireAdmin, async (_req, res, next) => {
+  try {
+    const status = await odooStatus();
+    res.json(status);
+  } catch (error) { next(error); }
+});
+
+// ==========================================
+// ADMIN TAX RULES MANAGEMENT
+// ==========================================
+app.get('/api/admin/tax-rules', requireAuth, requireAdmin, async (_req, res, next) => {
+  try {
+    const [rows] = await getPool().query(`
+      SELECT DISTINCT ON (data->>'code') data
+      FROM records
+      WHERE entity = 'tax-rules'
+      ORDER BY data->>'code', created_at DESC
+    `);
+    const items = rows.map(r => typeof r.data === 'string' ? JSON.parse(r.data) : r.data);
+    res.json(items);
+  } catch (error) { next(error); }
+});
+
+app.post('/api/admin/tax-rules', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { code, name, taxMode = 'VAT_CREDIT', vatRate = 10, pitRate = 0, status = 'ACTIVE', effectiveFrom = businessDate(), effectiveTo = '', legalReference = '', notes = '' } = req.body || {};
+    if (!code || !name) return res.status(400).json({ error: 'Mã quy tắc thuế và tên quy tắc là bắt buộc.' });
+    
+    const vRate = Number(vatRate) || 0;
+    const pRate = Number(pitRate) || 0;
+    const totalTaxRate = taxMode === 'HKD_REVENUE' ? (vRate + pRate) : vRate;
+
+    const [workshops] = await getPool().query('SELECT id FROM workshops');
+    const targetWids = workshops.length ? workshops.map(w => w.id) : [DEFAULT_WORKSHOP_ID];
+
+    let createdRecord = null;
+    for (const wid of targetWids) {
+      const id = randomUUID();
+      const payload = {
+        id,
+        code: String(code).trim().toUpperCase(),
+        name: String(name).trim(),
+        taxMode,
+        vatRate: vRate,
+        pitRate: pRate,
+        taxRate: totalTaxRate,
+        status,
+        version: 1,
+        effectiveFrom,
+        effectiveTo,
+        legalReference: String(legalReference || '').trim(),
+        notes: String(notes || '').trim(),
+        workshopId: wid,
+        seeded: false,
+      };
+      const saved = await saveRecord('tax-rules', payload, req.user.id, wid, 'LOCAL_DEMO');
+      if (!createdRecord) createdRecord = saved;
+    }
+
+    res.status(201).json({ ok: true, message: 'Đã thêm mức thuế mới thành công trên toàn hệ thống.', rule: createdRecord });
+  } catch (error) { next(error); }
+});
+
+app.put('/api/admin/tax-rules/:id', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { name, taxMode, vatRate, pitRate, status, effectiveFrom, effectiveTo, legalReference, notes } = req.body || {};
+    const [existing] = await getPool().query('SELECT * FROM records WHERE entity = $1 AND record_id = $2', ['tax-rules', req.params.id]);
+    if (!existing.length) return res.status(404).json({ error: 'Không tìm thấy quy tắc thuế.' });
+
+    const current = typeof existing[0].data === 'string' ? JSON.parse(existing[0].data) : existing[0].data;
+    const code = current.code;
+
+    const vRate = vatRate !== undefined ? Number(vatRate) : Number(current.vatRate || 0);
+    const pRate = pitRate !== undefined ? Number(pitRate) : Number(current.pitRate || 0);
+    const mode = taxMode || current.taxMode || 'VAT_CREDIT';
+    const totalTaxRate = mode === 'HKD_REVENUE' ? (vRate + pRate) : vRate;
+
+    const [matching] = await getPool().query(`SELECT * FROM records WHERE entity = 'tax-rules' AND data->>'code' = $1`, [code]);
+    for (const row of matching) {
+      const data = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
+      const updated = {
+        ...data,
+        name: name !== undefined ? String(name).trim() : data.name,
+        taxMode: mode,
+        vatRate: vRate,
+        pitRate: pRate,
+        taxRate: totalTaxRate,
+        status: status || data.status,
+        effectiveFrom: effectiveFrom !== undefined ? effectiveFrom : data.effectiveFrom,
+        effectiveTo: effectiveTo !== undefined ? effectiveTo : data.effectiveTo,
+        legalReference: legalReference !== undefined ? String(legalReference).trim() : data.legalReference,
+        notes: notes !== undefined ? String(notes).trim() : data.notes,
+        version: Number(data.version || 1) + 1,
+      };
+      await saveRecord('tax-rules', updated, req.user.id, row.workshop_id, 'LOCAL_DEMO');
+    }
+
+    res.json({ ok: true, message: 'Đã cập nhật quy tắc thuế trên toàn hệ thống.' });
+  } catch (error) { next(error); }
+});
+
+app.patch('/api/admin/tax-rules/:id/status', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { status } = req.body || {};
+    if (!['ACTIVE', 'INACTIVE', 'REVIEW_REQUIRED'].includes(status)) return res.status(400).json({ error: 'Trạng thái không hợp lệ.' });
+    const [existing] = await getPool().query('SELECT * FROM records WHERE entity = $1 AND record_id = $2', ['tax-rules', req.params.id]);
+    if (!existing.length) return res.status(404).json({ error: 'Không tìm thấy quy tắc thuế.' });
+
+    const current = typeof existing[0].data === 'string' ? JSON.parse(existing[0].data) : existing[0].data;
+    const [matching] = await getPool().query(`SELECT * FROM records WHERE entity = 'tax-rules' AND data->>'code' = $1`, [current.code]);
+    for (const row of matching) {
+      const data = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
+      await saveRecord('tax-rules', { ...data, status }, req.user.id, row.workshop_id, 'LOCAL_DEMO');
+    }
+
+    res.json({ ok: true, message: `Đã chuyển trạng thái quy tắc thuế thành ${status}.` });
+  } catch (error) { next(error); }
+});
+
+// ==========================================
+// ADMIN ODOO QUEUE & SYNC MANAGEMENT
+// ==========================================
+app.get('/api/admin/odoo/queue', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { status, entity, q } = req.query || {};
+    let query = `
+      SELECT j.id, j.workshop_id, j.entity, j.record_id, j.status, j.attempts, j.last_error, j.created_at, j.updated_at,
+             w.name as workshop_name, w.code as workshop_code
+      FROM odoo_sync_jobs j
+      LEFT JOIN workshops w ON j.workshop_id = w.id
+      WHERE 1=1
+    `;
+    const params = [];
+
+    if (status && status !== 'ALL') {
+      params.push(status);
+      query += ` AND j.status = $${params.length}`;
+    }
+    if (entity && entity !== 'ALL') {
+      params.push(entity);
+      query += ` AND j.entity = $${params.length}`;
+    }
+    if (q && q.trim()) {
+      params.push(`%${q.trim()}%`);
+      query += ` AND (j.record_id ILIKE $${params.length} OR j.last_error ILIKE $${params.length} OR w.name ILIKE $${params.length})`;
+    }
+
+    query += ` ORDER BY j.created_at DESC LIMIT 100`;
+
+    const [rows] = await getPool().query(query, params);
+    
+    // Stats
+    const [statsRows] = await getPool().query(`
+      SELECT status, count(*) as count FROM odoo_sync_jobs GROUP BY status
+    `);
+    const stats = { total: 0, pending: 0, synced: 0, failed: 0 };
+    for (const r of statsRows) {
+      const c = Number(r.count || 0);
+      stats.total += c;
+      if (r.status === 'SYNCED') stats.synced += c;
+      else if (r.status === 'PENDING') stats.pending += c;
+      else stats.failed += c;
+    }
+
+    res.json({ items: rows, stats });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/admin/odoo/retry-job/:id', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const [rows] = await getPool().query('SELECT * FROM odoo_sync_jobs WHERE id = $1', [id]);
+    if (!rows.length) return res.status(404).json({ error: 'Không tìm thấy job đồng bộ.' });
+
+    await getPool().query(`
+      UPDATE odoo_sync_jobs
+      SET status = 'PENDING', attempts = 0, last_error = NULL, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $1
+    `, [id]);
+
+    await createAudit({
+      actor: auditActor(req.user),
+      action: 'ODOO_JOB_RETRY',
+      entity: 'odoo_sync_jobs',
+      recordId: id,
+      workshopId: rows[0].workshop_id,
+    });
+
+    res.json({ ok: true, message: 'Đã đặt lại job đồng bộ thành PENDING.' });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/admin/odoo/sync-all', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const result = await syncOdooJobs({ statuses: ['PENDING', 'PENDING_RETRY', 'PENDING_MAPPING'], limit: 50 });
+    await createAudit({
+      actor: auditActor(req.user),
+      action: 'ODOO_SYNC_ALL_ATTEMPT',
+      entity: 'odoo_sync_jobs',
+      afterData: result,
+    });
+    res.json({ ok: true, result });
+  } catch (error) {
+    res.status(409).json({ error: error.message || 'Lỗi khi đồng bộ Odoo.' });
+  }
+});
+
+// ==========================================
+// ADMIN WORKSHOP STATUS TOGGLE
+// ==========================================
+app.patch('/api/admin/workshops/:id/status', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { active } = req.body || {};
+    const [rows] = await getPool().query('SELECT * FROM workshops WHERE id = $1', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Không tìm thấy xưởng.' });
+
+    await getPool().query('UPDATE workshops SET active = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', [Boolean(active), req.params.id]);
+    await createAudit({
+      actor: auditActor(req.user),
+      action: active ? 'WORKSHOP_ACTIVATED' : 'WORKSHOP_SUSPENDED',
+      entity: 'workshops',
+      recordId: req.params.id,
+      afterData: { active: Boolean(active) },
+    });
+
+    res.json({ ok: true, message: `Đã ${active ? 'kích hoạt' : 'tạm ngừng'} xưởng thành công.` });
+  } catch (error) { next(error); }
+});
+
+// ==========================================
+// ADMIN SMTP SETTINGS & TEST
+// ==========================================
+app.get('/api/admin/smtp/status', requireAuth, requireAdmin, async (_req, res, next) => {
+  try {
+    res.json(smtpStatus());
+  } catch (error) { next(error); }
+});
+
+app.post('/api/admin/smtp/test', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { to } = req.body || {};
+    if (!to || !validEmail(to)) return res.status(400).json({ error: 'Địa chỉ email nhận không hợp lệ.' });
+
+    const result = await sendCustomEmail({
+      to,
+      subject: 'FinTax Platform - Thử nghiệm Cấu hình Email SMTP',
+      text: 'Xin chào Quản trị viên, hệ thống gửi email SMTP của FinTax Platform đang hoạt động hoàn toàn bình thường.',
+      html: `
+        <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;">
+          <h2 style="color: #0f766e; margin-top: 0;">FinTax Platform - Email Thử Nghiệm</h2>
+          <p>Xin chào <strong>Quản trị viên Hệ thống</strong>,</p>
+          <p>Đây là email kiểm tra kết nối từ bảng Quản trị Nền tảng FinTax (FinWorkshop).</p>
+          <div style="background: #f8fafc; padding: 12px 16px; border-left: 4px solid #0f766e; margin: 16px 0;">
+            <p style="margin: 0; font-size: 14px; color: #334155;"><strong>Trạng thái kết nối SMTP:</strong> Sẵn sàng hoạt động.</p>
+            <p style="margin: 4px 0 0 0; font-size: 13px; color: #64748b;">Thời gian kiểm tra: ${new Date().toLocaleString('vi-VN')}</p>
+          </div>
+          <p style="font-size: 12px; color: #94a3b8; margin-bottom: 0;">Trân trọng,<br>Hệ thống Quản trị FinTax</p>
+        </div>
+      `,
+    });
+
+    if (!result?.ok) {
+      return res.status(400).json({ error: result?.note || 'Không thể gửi email qua SMTP.' });
+    }
+
+    res.json({ ok: true, message: `Đã gửi email thử nghiệm thành công tới ${to}.` });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Lỗi gửi email thử nghiệm.' });
+  }
 });
 
 app.post('/api/transfers', requireAuth, async (req, res) => {
@@ -1619,7 +2016,7 @@ app.post('/api/:entity/:id/actions/:action', requireAuth, requireEntity, async (
       after.simulatedAt = response.data.issuedAt;
       after.verification = 'Đã mô phỏng';
       after.taxPortalTrace = {
-        endpoint: `${taxApiUrl.replace('127.0.0.1', 'localhost')}/api/v1/invoices/issue`,
+        endpoint: '/tax-portal/api/v1/invoices/issue',
         sentPayload,
         responsePayload: response.data,
         exchangedAt: new Date().toISOString(),

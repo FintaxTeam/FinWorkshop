@@ -119,6 +119,13 @@ function Gate() {
   const location = useLocation();
   if (loading) return <div className="flex min-h-screen items-center justify-center text-xs text-slate-500">{isEn ? 'Authenticating session…' : 'Đang xác thực phiên…'}</div>;
   if (!user) return <Navigate to="/login" replace state={{ from: `${location.pathname}${location.search}${location.hash}` }} />;
+  
+  // Nếu là Chủ web (Admin) và truy cập /app, chuyển hướng ngay về /admin (Trang quản trị web)
+  const isAdmin = user.role === 'ADMIN' || user.isAdmin;
+  if (isAdmin && (location.pathname === '/app' || location.pathname === '/') && !location.search.includes('view=workshop')) {
+    return <Navigate to="/admin" replace />;
+  }
+
   const entity = location.pathname === '/app' && ['WORKSHOP', 'WAREHOUSE'].includes(user.role) ? undefined : pageAccessEntities[location.pathname];
   if (entity && !userCanAccess(user, entity)) return <Navigate to="/settings" replace />;
   return <Outlet />;
@@ -584,6 +591,22 @@ function AppShell() {
 
       {/* 4. MAIN CONTENT AREA */}
       <main className="flex-1 w-full max-w-full px-3.5 sm:px-6 py-4">
+        {(user?.role === 'ADMIN' || user?.isAdmin) && (
+          <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50/80 px-4 py-2.5 text-xs text-amber-900 flex items-center justify-between shadow-2xs">
+            <div className="flex items-center gap-2">
+              <ShieldCheck size={16} className="text-amber-600 shrink-0" />
+              <span>
+                <strong>Chế độ xem xưởng:</strong> Bạn đang xem Bàn làm việc & dữ liệu xưởng với tư cách Quản trị viên (Chủ web).
+              </span>
+            </div>
+            <Link
+              to="/admin"
+              className="inline-flex items-center gap-1 rounded-lg bg-amber-600 px-3 py-1 font-semibold text-white hover:bg-amber-700 transition shadow-2xs shrink-0"
+            >
+              <span>Về Trang Chủ Web</span>
+            </Link>
+          </div>
+        )}
         <Routes>
           <Route path="app" element={<HomePage />} />
           <Route path="transactions" element={<TransactionsPage />} />
