@@ -12,7 +12,7 @@ const getBaseUrl = () => {
     if (cached) return cached;
 
     if (window.location.origin.includes('fintaxauto.space')) {
-      return 'https://demands-documentary-metals-rat.trycloudflare.com/api';
+      return '/api';
     }
     return '/api';
   }

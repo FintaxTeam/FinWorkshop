@@ -1,4 +1,4 @@
-const CACHE = 'fintax-shell-v4';
+const CACHE = 'fintax-shell-v5';
 self.addEventListener('install', (event) => {
   self.skipWaiting();
 });
