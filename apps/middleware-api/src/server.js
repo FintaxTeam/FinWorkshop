@@ -871,6 +871,41 @@ app.get('/api/integrations/status', requireAuth, async (_req, res) => {
   const currency = company ? await currencyStatus(company.id).catch((error) => ({ready:false,message:error.message})) : null;
   res.json({ odoo: status, company, currency, smtp: smtpStatus(), odooQueue: Object.fromEntries(queue.map((row) => [row.status, Number(row.total)])), tax: { type: 'MOCK', label: 'API thuế giả lập', url: taxApiUrl }, mode: 'DEMO' });
 });
+app.get('/api/tax-portal/overview', requireAuth, async (req, res) => {
+  const wid = req.user?.workshopId || DEFAULT_WORKSHOP_ID;
+  const workshop = await getWorkshop(wid).catch(() => null);
+  let portalOnline = false;
+  let taxHistory = [];
+  try {
+    const [healthRes, historyRes] = await Promise.all([
+      axios.get(`${taxApiUrl}/health`, { timeout: 2500 }),
+      axios.get(`${taxApiUrl}/api/tax/history`, { timeout: 2500 }),
+    ]);
+    portalOnline = healthRes.data?.status === 'OK';
+    taxHistory = historyRes.data?.data || [];
+  } catch {
+    portalOnline = false;
+  }
+  const invoices = (await listRecords('invoices', wid))
+    .filter((row) => active(row) && invoiceDirection(row) === 'OUTPUT')
+    .slice(0, 30);
+  res.json({
+    portalOnline,
+    portalUrl: taxApiUrl.replace('127.0.0.1', 'localhost'),
+    workshopName: workshop?.name || req.user?.workshopName || DEFAULT_WORKSHOP_NAME,
+    workshopTaxCode: workshop?.tax_id || '0316890123',
+    taxHistory,
+    invoices,
+  });
+});
+app.get('/api/tax-portal/verify/:code', requireAuth, async (req, res) => {
+  try {
+    const response = await axios.get(`${taxApiUrl}/api/tax/invoice/verify/${encodeURIComponent(req.params.code)}`, { timeout: 3000 });
+    res.json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 502).json(error.response?.data || { success: false, message: 'Không kết nối được Cổng Thuế để xác thực mã.' });
+  }
+});
 app.post('/api/integrations/odoo/company',requireAuth,requireOwner,async(req,res)=>{
   try { const result=await provisionCompany(auditActor(req.user)); await createAudit({actor:auditActor(req.user),action:'ODOO_COMPANY_LINKED',entity:'integrations',afterData:result}); res.json(result); }catch(error){ if(error.code==='ECONNREFUSED'||!error.status) throw businessError('Odoo chưa sẵn sàng. Dữ liệu trong ứng dụng đã được giữ lại.',409); throw error; }
 });
@@ -1412,8 +1447,31 @@ app.post('/api/:entity/:id/actions/:action', requireAuth, requireEntity, async (
   else if (action === 'simulate-code' && entity === 'invoices' && invoiceDirection(before) === 'OUTPUT') {
     if (before.mockTaxCode) return res.status(409).json({ error: `Hóa đơn đã có mã mô phỏng (${before.mockTaxCode}). Không cấp lại mã trên cùng hóa đơn.` });
     try {
-      const response = await axios.post(`${taxApiUrl}/api/v1/invoices/issue`, { invoiceId: id, invoiceCode: before.code, total: before.total }, { timeout: 5000 });
-      after.status = 'DEMO_CODE_ISSUED'; after.mockTaxCode = response.data.mockTaxCode; after.simulatedAt = response.data.issuedAt; after.verification = 'Đã mô phỏng';
+      const workshop = await getWorkshop(wid).catch(() => null);
+      const sentPayload = {
+        invoiceId: id,
+        invoiceCode: before.code,
+        invoiceDate: before.date,
+        sellerName: workshop?.name || req.user.workshopName || DEFAULT_WORKSHOP_NAME,
+        sellerTaxCode: workshop?.tax_id || '0316890123',
+        buyerName: before.counterparty || 'Khách hàng',
+        buyerTaxCode: before.taxCode || '',
+        subtotal: before.subtotal || 0,
+        taxAmount: before.taxAmount || 0,
+        total: before.total || 0,
+      };
+      const response = await axios.post(`${taxApiUrl}/api/v1/invoices/issue`, sentPayload, { timeout: 5000 });
+      after.status = 'DEMO_CODE_ISSUED';
+      after.mockTaxCode = response.data.mockTaxCode;
+      after.tax_authority_code = response.data.mockTaxCode;
+      after.simulatedAt = response.data.issuedAt;
+      after.verification = 'Đã mô phỏng';
+      after.taxPortalTrace = {
+        endpoint: `${taxApiUrl.replace('127.0.0.1', 'localhost')}/api/v1/invoices/issue`,
+        sentPayload,
+        responsePayload: response.data,
+        exchangedAt: new Date().toISOString(),
+      };
     } catch { return res.status(502).json({ error: 'Không kết nối được Mock Tax API. Hóa đơn chưa được mô phỏng cấp mã.' }); }
   }
   else if (action === 'classify' && entity === 'transactions') {

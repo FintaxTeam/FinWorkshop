@@ -1,8 +1,8 @@
 import { useEffect,useMemo,useRef,useState,type ReactNode } from 'react';
 import { useLocation,useSearchParams } from 'react-router-dom';
-import { Button,EmptyState,SearchBox,StatusBadge } from './components';
+import { Button,EmptyState,SearchBox,StatusBadge,useToast } from './components';
 import { exportExcel,type ExportColumn } from './exports';
-import { AlertTriangle,ArrowDownToLine,ArrowUpDown,Check,Columns3,Filter,RotateCcw } from 'lucide-react';
+import { AlertTriangle,ArrowDownToLine,ArrowUpDown,Check,Columns3,Copy,Filter,RotateCcw } from 'lucide-react';
 import { actionLabel,displayLabel,entityLabels,formatNumber,formatTaxRate,isMoneyField,plainValue,referenceText,vietnamDate } from './presentation';
 import { formatDate,formatVnd,statusLabel,today } from './api';
 import { useLanguage } from './language';
@@ -84,6 +84,7 @@ export function Pagination({ page, pageSize, total, onPage, onPageSize }: { page
 
 export function DataTable({ title, rows, columns, controls, emptyTitle, emptyHint }: { emptyTitle?: string; emptyHint?: string; title: string; rows: Record<string, any>[]; columns: ExportColumn[]; controls?: (row: any) => ReactNode }) {
   const { t, isEn } = useLanguage();
+  const toast = useToast();
   const location = useLocation();
   const [, setSearchParams] = useSearchParams();
   const initialParams = new URLSearchParams(location.search);
@@ -229,6 +230,21 @@ export function DataTable({ title, rows, columns, controls, emptyTitle, emptyHin
     if (key.endsWith('Id')) return referenceText(row,key);
     if (/Rate$/.test(key)) return formatTaxRate(['wasteRate','marginRate'].includes(key) && Number(value) < 1 ? Number(value)*100 : value, row.taxTreatment);
     if (key === 'last_error') return !value ? '—' : isEn ? 'Configuration / connection error' : /ngày giấy tờ|quá 7 ngày|đúng kỳ/i.test(value) ? 'Cần tỷ giá đúng kỳ' : /tax|thuế/i.test(value) ? 'Cần khớp mức thuế' : /VND|tiền tệ|tỷ giá/i.test(value) ? 'Cần kiểm tra VND và tỷ giá' : /connect|timeout|ECONN/i.test(value) ? 'Lỗi kết nối · Chờ thử lại' : 'Kiểm tra cấu hình Odoo';
+    if (key === 'mockTaxCode') {
+      return exportValue ? String(value) : (
+        <button
+          type="button"
+          onClick={() => {
+            void navigator.clipboard.writeText(String(value)).then(() => toast(isEn ? `Copied: ${value}` : `Đã sao chép mã CQT: ${value}`)).catch(() => undefined);
+          }}
+          title={isEn ? 'Click to copy Tax Authority Code' : 'Bấm để sao chép Mã CQT'}
+          className="inline-flex items-center gap-1.5 rounded-md border border-emerald-200 bg-emerald-50/80 px-2 py-0.5 font-mono text-xs font-bold text-emerald-700 hover:bg-emerald-100 transition-colors"
+        >
+          <span>{String(value)}</span>
+          <Copy size={11} className="shrink-0 opacity-75" />
+        </button>
+      );
+    }
     if (key === 'progress') return exportValue ? `${value}%` : <div className="min-w-24"><div className="mb-1 text-right text-xs font-bold text-slate-700">{formatNumber(value)}%</div><div className="h-1.5 rounded-full bg-slate-100 overflow-hidden"><div className="h-full rounded-full bg-brand-600" style={{ width: `${Math.min(100,Number(value))}%` }}/></div></div>;
     if (column.format === 'status' || column.format === 'classification' || ['status','direction','type','approvalStatus','odooSyncStatus','syncStatus','role','source','taxMode','ownerScope'].includes(key)) {
       const isPayment = key === 'direction' && ['PAID','RECEIVED','PAYMENT','RECEIPT'].includes(value);

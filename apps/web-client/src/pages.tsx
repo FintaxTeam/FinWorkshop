@@ -1,6 +1,6 @@
 import { pageText } from './pageText';
 import { useCallback,useEffect,useRef,useState,type ReactNode } from 'react';
-import { Activity,Banknote,Boxes,BriefcaseBusiness,CalendarClock,ChevronDown,ClipboardCheck,FileCheck2,FileClock,FileSpreadsheet,FileText,Factory,Globe,Mail,Package,RefreshCw,ShieldAlert,ShieldCheck,Upload,Users,Wallet,X } from 'lucide-react';
+import { Activity,Banknote,Boxes,BriefcaseBusiness,CalendarClock,ChevronDown,ClipboardCheck,FileCheck2,FileClock,FileSpreadsheet,FileText,Factory,Globe,Landmark,Mail,Package,RefreshCw,ShieldAlert,ShieldCheck,Upload,Users,Wallet,X } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { today,actionRecord,api,createRecord,formatDate,formatVnd,getRecords,messageOf,statusLabel,updateRecord,type RecordRow } from './api';
 import { useAuth } from './auth';
@@ -106,7 +106,16 @@ function ResourcePage({ entity, title, columns, fields, actions, toolbar, rowExt
       const result = await actionRecord<Row>(entity, row.id, item.action, { note });
       await reload();
       if (item.action === 'revise') { setDetail(null); setEditing(result); }
-      toast(item.action === 'revise' ? (isEn ? 'Created new version.' : 'Đã tạo phiên bản mới.') : (isEn ? 'Record updated.' : 'Đã cập nhật giấy tờ.'));
+      if (item.action === 'simulate-code' && result.mockTaxCode) {
+        try { await navigator.clipboard.writeText(String(result.mockTaxCode)); } catch { /* ignore */ }
+      }
+      toast(
+        item.action === 'revise'
+          ? (isEn ? 'Created new version.' : 'Đã tạo phiên bản mới.')
+          : item.action === 'simulate-code'
+          ? (isEn ? `Issued Tax Code: ${result.mockTaxCode}` : `Đã cấp mã CQT: ${result.mockTaxCode} (Đã sao chép mã)`)
+          : (isEn ? 'Record updated.' : 'Đã cập nhật giấy tờ.')
+      );
       window.dispatchEvent(new Event('fintax:records-changed'));
     } finally {
       pendingActionRef.current = false;
@@ -315,7 +324,7 @@ export function InvoicesPage() {
     next.delete('new');
     setParams(next);
   };
-  return <><div className="mb-5 flex gap-3">{(['OUTPUT', 'INPUT'] as const).map((type) => <Button key={type} variant={activeTab === type ? 'primary' : 'secondary'} onClick={() => selectTab(type)}>{type === 'INPUT' ? (isEn ? 'Purchase Invoices (In)' : 'Hóa đơn mua vào (Chi)') : (isEn ? 'Sales Invoices (Out)' : 'Hóa đơn bán ra (Thu)')}</Button>)}</div><ResourcePage key={activeTab} fixedType={activeTab} entity="invoices" title={activeTab === 'INPUT' ? (isEn ? 'Purchase Invoices' : 'Hóa đơn mua vào') : (isEn ? 'Sales Invoices' : 'Hóa đơn bán ra')} description={isEn ? 'Itemized tax calculation; track settled and outstanding debt amounts.' : 'Tự tính thuế theo từng mặt hàng; theo dõi thanh toán và tiền còn nợ.'} icon={<FileCheck2 size={18}/>} columns={[{ key: 'code', label: isEn ? 'Invoice No.' : 'Số hóa đơn' }, { key: 'direction', label: isEn ? 'Type' : 'Loại', format: 'status' }, { key: 'counterparty', label: isEn ? 'Partner / Client' : 'Khách / người bán' }, { key: 'date', label: isEn ? 'Date' : 'Ngày', format: 'date' }, { key: 'subtotal', label: isEn ? 'Subtotal' : 'Tiền hàng', format: 'money' }, { key: 'taxAmount', label: isEn ? 'Tax' : 'Thuế', format: 'money' }, { key: 'total', label: isEn ? 'Total' : 'Tổng tiền', format: 'money' }, { key: 'openBalance', label: isEn ? 'Remaining Balance' : 'Còn nợ', format: 'money' }, { key: 'paymentStatus', label: isEn ? 'Payment' : 'Thanh toán', format: 'status' }, { key: 'status', label: isEn ? 'Status' : 'Trạng thái', format: 'status' }]} fields={[]} actions={(row) => row.direction === 'OUTPUT' && !['DEMO_CODE_ISSUED', 'CANCELLED'].includes(row.status || '') ? [{ label: isEn ? 'Issue Tax Code' : 'Cấp mã hóa đơn', action: 'simulate-code' }] : []} rowExtra={(row) => row.odooUrl ? <a href={row.odooUrl} target="_blank" rel="noreferrer" className="text-xs font-semibold text-brand-700">{isEn ? 'Open Odoo' : 'Mở Odoo'}</a> : null}/></>;
+  return <><div className="mb-5 flex flex-wrap items-center justify-between gap-3"><div className="flex gap-3">{(['OUTPUT', 'INPUT'] as const).map((type) => <Button key={type} variant={activeTab === type ? 'primary' : 'secondary'} onClick={() => selectTab(type)}>{type === 'INPUT' ? (isEn ? 'Purchase Invoices (In)' : 'Hóa đơn mua vào (Chi)') : (isEn ? 'Sales Invoices (Out)' : 'Hóa đơn bán ra (Thu)')}</Button>)}</div>{activeTab === 'OUTPUT' && <a href="http://localhost:4000" target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 shadow-2xs"><Landmark size={14} className="text-brand-600"/>{isEn ? 'Open Mock Tax Portal (:4000)' : 'Mở Cổng Tra Cứu Thuế (:4000)'}</a>}</div><ResourcePage key={activeTab} fixedType={activeTab} entity="invoices" title={activeTab === 'INPUT' ? (isEn ? 'Purchase Invoices' : 'Hóa đơn mua vào') : (isEn ? 'Sales Invoices' : 'Hóa đơn bán ra')} description={isEn ? 'Itemized tax calculation; track settled and outstanding debt amounts.' : 'Tự tính thuế theo từng mặt hàng; theo dõi thanh toán và tiền còn nợ.'} icon={<FileCheck2 size={18}/>} columns={[{ key: 'code', label: isEn ? 'Invoice No.' : 'Số hóa đơn' }, ...(activeTab === 'OUTPUT' ? [{ key: 'mockTaxCode', label: isEn ? 'Tax Code (CQT)' : 'Mã CQT' }] : []), { key: 'direction', label: isEn ? 'Type' : 'Loại', format: 'status' as const }, { key: 'counterparty', label: isEn ? 'Partner / Client' : 'Khách / người bán' }, { key: 'date', label: isEn ? 'Date' : 'Ngày', format: 'date' as const }, { key: 'subtotal', label: isEn ? 'Subtotal' : 'Tiền hàng', format: 'money' as const }, { key: 'taxAmount', label: isEn ? 'Tax' : 'Thuế', format: 'money' as const }, { key: 'total', label: isEn ? 'Total' : 'Tổng tiền', format: 'money' as const }, { key: 'openBalance', label: isEn ? 'Remaining Balance' : 'Còn nợ', format: 'money' as const }, { key: 'paymentStatus', label: isEn ? 'Payment' : 'Thanh toán', format: 'status' as const }, { key: 'status', label: isEn ? 'Status' : 'Trạng thái', format: 'status' as const }]} fields={[]} actions={(row) => row.direction === 'OUTPUT' && !['DEMO_CODE_ISSUED', 'CANCELLED'].includes(row.status || '') ? [{ label: isEn ? 'Issue Tax Code' : 'Cấp mã hóa đơn', action: 'simulate-code' }] : []} /></>;
 }
 export function CustomersPage() {
   const { isEn } = useLanguage();

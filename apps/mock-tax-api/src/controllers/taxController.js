@@ -44,8 +44,12 @@ export const taxController = {
       const invoiceNumber = body.invoiceNumber || body.invoiceCode;
       const invoiceDate = body.invoiceDate || new Date().toISOString().slice(0, 10);
       const totalAmount = body.totalAmount ?? body.total;
-      const sellerTaxCode = body.sellerTaxCode ? String(body.sellerTaxCode).replace(/[\s-]/g, '') : null;
+      const sellerTaxCode = body.sellerTaxCode ? String(body.sellerTaxCode).replace(/[\s-]/g, '') : '0316890123';
       const buyerTaxCode = body.buyerTaxCode ? String(body.buyerTaxCode).replace(/[\s-]/g, '') : null;
+      const buyerName = body.buyerName || body.counterparty || 'Khách hàng doanh nghiệp';
+      const sellerName = body.sellerName || 'Xưởng Sản Xuất FinWorkshop';
+      const subtotal = Number(body.subtotal ?? totalAmount ?? 0);
+      const taxAmount = Number(body.taxAmount ?? 0);
 
       if (!invoiceNumber || totalAmount === undefined || (middlewareRequest && !invoiceId) || (!middlewareRequest && !sellerTaxCode)) {
         return res.status(400).json({
@@ -57,7 +61,7 @@ export const taxController = {
         });
       }
 
-      if ((!middlewareRequest && !taxCodePattern.test(sellerTaxCode)) || (buyerTaxCode && !taxCodePattern.test(buyerTaxCode))) {
+      if (!middlewareRequest && (!taxCodePattern.test(sellerTaxCode) || (buyerTaxCode && !taxCodePattern.test(buyerTaxCode)))) {
         return res.status(422).json({
           success: false,
           errorCode: 'INVALID_TAX_CODE_FORMAT',
@@ -85,10 +89,14 @@ export const taxController = {
       const record = {
         taxAuthorityCode,
         sellerTaxCode,
-        buyerTaxCode,
+        sellerName,
+        buyerTaxCode: buyerTaxCode || '—',
+        buyerName,
         invoiceId,
         invoiceNumber,
         invoiceDate,
+        subtotal,
+        taxAmount,
         totalAmount: Number(totalAmount),
         status: 'APPROVED',
         simulated: true,
