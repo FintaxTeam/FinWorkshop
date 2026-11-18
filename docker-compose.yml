@@ -57,6 +57,8 @@ services:
     depends_on:
       odoo-db:
         condition: service_healthy
+      odoo:
+        condition: service_started
     ports:
       - "3001:3001"
     environment:
@@ -71,9 +73,16 @@ services:
       TAX_API_URL: http://mock-tax-api:4000
       WEB_ORIGIN: "*"
       ODOO_URL: http://odoo:8069
+      ODOO_DB: fintax_clean
+      ODOO_USERNAME: admin
+      ODOO_PASSWORD: admin
       SEED_DEMO_DATA: "true"
       ODOO_SYNC_WORKER: "true"
       WORKSHOP_TIME_ZONE: Asia/Ho_Chi_Minh
+      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
 
   web-client:
     build:

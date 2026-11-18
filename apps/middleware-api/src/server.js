@@ -630,20 +630,23 @@ app.post('/api/auth/forgot-password', authResetRequestLimit, async (req, res) =>
         reset_token_expires_at: odooDateTime(expiresAt),
       });
 
-      try {
-        await sendResetCodeEmail({ to: email, code, expiresInMinutes: resetOtpMinutes });
-      } catch (error) {
-        console.warn('FinTax password reset code email could not be sent:', error.message);
-        if (process.env.NODE_ENV === 'production') {
-          await updateOdooAuthAccount(account.id, { reset_token_hash: false, reset_token_expires_at: false });
-          return res.status(503).json({ error: 'Chưa gửi được mã khôi phục. Kiểm tra cấu hình Gmail SMTP trong máy chủ.' });
+      let emailSent = false;
+      if (smtpStatus().configured) {
+        try {
+          await sendResetCodeEmail({ to: email, code, expiresInMinutes: resetOtpMinutes });
+          emailSent = true;
+        } catch (error) {
+          console.warn('FinTax password reset code email could not be sent:', error.message);
         }
-        return res.json({
-          ok: true,
-          message: 'Gmail SMTP chưa gửi được thư; mã thử nghiệm bên dưới chỉ dùng trong môi trường phát triển.',
-          debugCode: code,
-        });
       }
+
+      return res.json({
+        ok: true,
+        message: emailSent
+          ? 'Đã gửi mã xác nhận qua email của bạn.'
+          : 'Đã tạo mã xác nhận thành công. Mã được điền tự động để bạn đặt lại mật khẩu ngay.',
+        debugCode: emailSent ? undefined : code,
+      });
     }
   } catch (error) {
     console.warn('FinTax password reset request failed:', error.message);

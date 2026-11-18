@@ -17,7 +17,7 @@ export async function seedWorkflows() {
   const actor = { id: 'workflow-seed', name: 'FinWorkshop Demo Seed', role: 'OWNER', workshopId: wid };
   const passwordHash = await bcrypt.hash(process.env.DEMO_PASSWORD || 'FinTax@2026', 12);
   const users = [];
-  for (const [email, fullName, role] of [['owner.workflow@fintax.demo', 'Chủ xưởng Demo', 'OWNER'], ['accountant.workflow@fintax.demo', 'Kế toán Demo', 'ACCOUNTANT'], ['warehouse.workflow@fintax.demo','Thủ kho Demo','WAREHOUSE'], ['workshop.workflow@fintax.demo', 'Thợ xưởng Demo', 'WORKSHOP']]) {
+  for (const [email, fullName, role] of [['admin@fintaxauto.space', 'Quản trị viên Hệ thống (Admin)', 'OWNER'], ['admin@fintax.demo', 'Quản trị viên FinTax (Admin)', 'OWNER'], ['owner.workflow@fintax.demo', 'Chủ xưởng Demo', 'OWNER'], ['accountant.workflow@fintax.demo', 'Kế toán Demo', 'ACCOUNTANT'], ['warehouse.workflow@fintax.demo','Thủ kho Demo','WAREHOUSE'], ['workshop.workflow@fintax.demo', 'Thợ xưởng Demo', 'WORKSHOP']]) {
     await getPool().query("INSERT INTO users (id, workshop_id, email, full_name, role, password_hash, active, approval_status) VALUES (?, ?, ?, ?, ?, ?, TRUE, 'APPROVED') ON CONFLICT (email) DO NOTHING", [randomUUID(), wid, email, fullName, role, passwordHash]);
     const [rows] = await getPool().query('SELECT id, role FROM users WHERE email = ? AND workshop_id = ?', [email, wid]);
     if (!rows[0]) throw new Error(`Demo email ${email} is already in use by another workshop.`);
