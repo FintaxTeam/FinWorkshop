@@ -203,6 +203,68 @@ function scrambleElement(el: HTMLElement) {
   });
 }
 
+function EditorialCursor() {
+  const cursorRef = useRef<HTMLDivElement>(null);
+  const labelRef = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    const cursor = cursorRef.current;
+    if (!cursor) return;
+    if (
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches ||
+      window.matchMedia('(pointer: coarse)').matches
+    ) {
+      return;
+    }
+
+    const xTo = gsap.quickTo(cursor, 'x', { duration: 0.18, ease: 'power3.out' });
+    const yTo = gsap.quickTo(cursor, 'y', { duration: 0.18, ease: 'power3.out' });
+
+    const onMove = (e: PointerEvent) => {
+      cursor.classList.add('is-visible');
+      xTo(e.clientX);
+      yTo(e.clientY);
+
+      const target = e.target as HTMLElement | null;
+      const customZone = target?.closest<HTMLElement>('[data-cursor]');
+      const interactive = target?.closest<HTMLElement>('a, button, [role="tab"]');
+      const mode = customZone?.dataset.cursor || (interactive ? 'link' : 'default');
+
+      cursor.dataset.mode = mode;
+      cursor.classList.toggle('is-link', mode === 'link');
+      cursor.classList.toggle('is-pill', mode === 'drag' || mode === 'view');
+
+      if (labelRef.current) {
+        labelRef.current.textContent =
+          mode === 'drag' ? '< KÉO >' : mode === 'view' ? 'XEM ↗' : '';
+      }
+    };
+
+    const onLeave = () => cursor.classList.remove('is-visible');
+    const onDown = () => gsap.to(cursor, { scale: 0.84, duration: 0.12, ease: 'power2.out' });
+    const onUp = () => gsap.to(cursor, { scale: 1, duration: 0.2, ease: 'back.out(2)' });
+
+    window.addEventListener('pointermove', onMove, { passive: true });
+    document.addEventListener('pointerleave', onLeave);
+    window.addEventListener('pointerdown', onDown, { passive: true });
+    window.addEventListener('pointerup', onUp, { passive: true });
+
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerleave', onLeave);
+      window.removeEventListener('pointerdown', onDown);
+      window.removeEventListener('pointerup', onUp);
+    };
+  }, []);
+
+  return (
+    <div ref={cursorRef} className="fw-cursor" aria-hidden="true">
+      <span className="fw-cursor-dot" />
+      <span ref={labelRef} className="fw-cursor-label" />
+    </div>
+  );
+}
+
 function DitherPlasmaCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -224,6 +286,7 @@ function DitherPlasmaCanvas() {
     let width = 0;
     let height = 0;
     const cell = 6;
+    const pointer = { tx: 0.5, ty: 0.45, x: 0.5, y: 0.45, active: 0, targetActive: 0 };
 
     const resize = () => {
       const rect = canvas.getBoundingClientRect();
@@ -233,8 +296,25 @@ function DitherPlasmaCanvas() {
       canvas.height = Math.ceil(height / cell);
     };
 
+    const onPointerMove = (e: PointerEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      if (e.clientY >= rect.top && e.clientY <= rect.bottom) {
+        pointer.tx = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
+        pointer.ty = Math.max(0, Math.min(1, (e.clientY - rect.top) / Math.max(1, rect.height)));
+        pointer.targetActive = 1;
+      } else {
+        pointer.targetActive = 0;
+      }
+    };
+
+    const onPointerLeave = () => {
+      pointer.targetActive = 0;
+    };
+
     resize();
     window.addEventListener('resize', resize);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    document.addEventListener('pointerleave', onPointerLeave);
 
     let time = 0;
     const render = () => {
@@ -243,24 +323,35 @@ function DitherPlasmaCanvas() {
       const img = ctx.createImageData(w, h);
       const data = img.data;
 
+      pointer.x += (pointer.tx - pointer.x) * 0.1;
+      pointer.y += (pointer.ty - pointer.y) * 0.1;
+      pointer.active += (pointer.targetActive - pointer.active) * 0.08;
+
       for (let y = 0; y < h; y++) {
         for (let x = 0; x < w; x++) {
           const nx = x / w;
           const ny = y / h;
+          const dx = nx - pointer.x;
+          const dy = (ny - pointer.y) * (h / Math.max(1, w));
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          const ripple =
+            pointer.active * Math.exp(-dist * 7.5) * (0.48 + 0.25 * Math.sin(dist * 34 - time * 3.5));
+
           const wave =
             Math.sin(nx * 5.4 + time * 0.65) * 0.34 +
             Math.cos(ny * 4.2 - time * 0.5) * 0.34 +
             Math.sin((nx + ny) * 4.8 + time * 0.4) * 0.32;
-          const intensity = Math.max(0, Math.min(1, (wave + 1) * 0.44));
+          const intensity = Math.max(0, Math.min(1, (wave + 1) * 0.42 + ripple));
           const threshold = (bayer4[y & 3][x & 3] + 0.5) / 16;
           const idx = (y * w + x) * 4;
 
           if (intensity > threshold * 0.92 + 0.16) {
-            const isCrimsonPeak = intensity > 0.72 && (x + y) % 5 === 0;
+            const isCrimsonPeak =
+              (ripple > 0.16 && (x + y) % 2 === 0) || (intensity > 0.72 && (x + y) % 5 === 0);
             data[idx] = isCrimsonPeak ? 185 : 196;
             data[idx + 1] = isCrimsonPeak ? 36 : 206;
             data[idx + 2] = isCrimsonPeak ? 38 : 210;
-            data[idx + 3] = isCrimsonPeak ? 120 : 145;
+            data[idx + 3] = isCrimsonPeak ? Math.min(200, Math.round(125 + ripple * 160)) : 145;
           } else {
             data[idx] = 255;
             data[idx + 1] = 255;
@@ -281,6 +372,8 @@ function DitherPlasmaCanvas() {
     return () => {
       cancelAnimationFrame(rafId);
       window.removeEventListener('resize', resize);
+      window.removeEventListener('pointermove', onPointerMove);
+      document.removeEventListener('pointerleave', onPointerLeave);
     };
   }, []);
 
@@ -492,6 +585,114 @@ export default function LandingPage() {
     });
   }, [activeArc]);
 
+  // GSAP Pointer-Reactive Micro-Interactions (Magnetic Buttons, 3D Tilt + Sheen, Wireframe Re-draw, Arc Sway)
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    if (
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches ||
+      window.matchMedia('(pointer: coarse)').matches
+    ) {
+      return;
+    }
+
+    const cleanups: Array<() => void> = [];
+
+    // 1. Magnetic Buttons
+    root.querySelectorAll<HTMLElement>('[data-magnetic]').forEach((el) => {
+      const xTo = gsap.quickTo(el, 'x', { duration: 0.35, ease: 'power3.out' });
+      const yTo = gsap.quickTo(el, 'y', { duration: 0.35, ease: 'power3.out' });
+      const strength = Number(el.dataset.magnetic || '12');
+
+      const onMove = (e: PointerEvent) => {
+        const r = el.getBoundingClientRect();
+        const rx = (e.clientX - r.left) / r.width - 0.5;
+        const ry = (e.clientY - r.top) / r.height - 0.5;
+        xTo(rx * strength * 2);
+        yTo(ry * strength * 2);
+      };
+      const onLeave = () => {
+        gsap.to(el, { x: 0, y: 0, duration: 0.65, ease: 'elastic.out(1, 0.42)', overwrite: 'auto' });
+      };
+
+      el.addEventListener('pointermove', onMove);
+      el.addEventListener('pointerleave', onLeave);
+      cleanups.push(() => {
+        el.removeEventListener('pointermove', onMove);
+        el.removeEventListener('pointerleave', onLeave);
+      });
+    });
+
+    // 2. 3D Perspective Tilt + Radial Sheen
+    root.querySelectorAll<HTMLElement>('[data-tilt-card]').forEach((el) => {
+      const rxTo = gsap.quickTo(el, 'rotationX', { duration: 0.35, ease: 'power3.out' });
+      const ryTo = gsap.quickTo(el, 'rotationY', { duration: 0.35, ease: 'power3.out' });
+      const maxTilt = Number(el.dataset.tiltCard || '5');
+      gsap.set(el, { transformPerspective: 1000 });
+
+      const onMove = (e: PointerEvent) => {
+        const r = el.getBoundingClientRect();
+        const px = (e.clientX - r.left) / r.width;
+        const py = (e.clientY - r.top) / r.height;
+        el.style.setProperty('--mx', `${(px * 100).toFixed(1)}%`);
+        el.style.setProperty('--my', `${(py * 100).toFixed(1)}%`);
+        ryTo((px - 0.5) * maxTilt * 2);
+        rxTo((0.5 - py) * maxTilt * 2);
+      };
+      const onLeave = () => {
+        gsap.to(el, { rotationX: 0, rotationY: 0, duration: 0.55, ease: 'power3.out', overwrite: 'auto' });
+      };
+
+      el.addEventListener('pointermove', onMove);
+      el.addEventListener('pointerleave', onLeave);
+      cleanups.push(() => {
+        el.removeEventListener('pointermove', onMove);
+        el.removeEventListener('pointerleave', onLeave);
+      });
+    });
+
+    // 3. Wireframe Card Hover SVG Accent Re-trace
+    root.querySelectorAll<HTMLElement>('.fw-wire-card').forEach((card) => {
+      const onEnter = () => {
+        const accentPaths = card.querySelectorAll<SVGGeometryElement>('path[stroke="#a91517"]');
+        accentPaths.forEach((p) => {
+          const len = p.getTotalLength ? p.getTotalLength() : 220;
+          gsap.fromTo(
+            p,
+            { strokeDasharray: len, strokeDashoffset: len },
+            { strokeDashoffset: 0, duration: 0.65, ease: 'power2.out' }
+          );
+        });
+      };
+      card.addEventListener('pointerenter', onEnter);
+      cleanups.push(() => card.removeEventListener('pointerenter', onEnter));
+    });
+
+    // 4. Arc Stage Mouse Sway
+    const arcStage = root.querySelector<HTMLElement>('.fw-arc-stage');
+    if (arcStage) {
+      const xTo = gsap.quickTo(arcStage, 'x', { duration: 0.5, ease: 'power3.out' });
+      const ryTo = gsap.quickTo(arcStage, 'rotationY', { duration: 0.5, ease: 'power3.out' });
+      const onMove = (e: PointerEvent) => {
+        const r = arcStage.getBoundingClientRect();
+        const nx = (e.clientX - r.left) / r.width - 0.5;
+        xTo(nx * -26);
+        ryTo(nx * 5);
+      };
+      const onLeave = () => {
+        gsap.to(arcStage, { x: 0, rotationY: 0, duration: 0.65, ease: 'power3.out' });
+      };
+      arcStage.addEventListener('pointermove', onMove);
+      arcStage.addEventListener('pointerleave', onLeave);
+      cleanups.push(() => {
+        arcStage.removeEventListener('pointermove', onMove);
+        arcStage.removeEventListener('pointerleave', onLeave);
+      });
+    }
+
+    return () => cleanups.forEach((fn) => fn());
+  }, []);
+
   const jumpToStage = (index: number) => {
     setActiveStage(index);
     const st = stageTriggerRef.current;
@@ -521,6 +722,7 @@ export default function LandingPage() {
 
   return (
     <div ref={rootRef}>
+      <EditorialCursor />
       {/* 1. Full-Viewport Dither Plasma Hero */}
       <section className="fw-coda-hero">
         <DitherPlasmaCanvas />
@@ -554,10 +756,10 @@ export default function LandingPage() {
               </div>
             </div>
             <div className="fw-action-row">
-              <Link className="fw-btn fw-btn-primary" to="/demo">
+              <Link className="fw-btn fw-btn-primary" to="/demo" data-magnetic="10">
                 Trải nghiệm sản phẩm <ArrowRight size={15} />
               </Link>
-              <Link className="fw-btn fw-btn-secondary" to="/san-pham">
+              <Link className="fw-btn fw-btn-secondary" to="/san-pham" data-magnetic="8">
                 Xem phân hệ <ArrowUpRight size={15} />
               </Link>
             </div>
@@ -616,7 +818,7 @@ export default function LandingPage() {
                 ))}
               </div>
 
-              <div className="fw-stage-viewport">
+              <div className="fw-stage-viewport fw-tilt-surface" data-tilt-card="3.5" data-cursor="view">
                 <div className="fw-stage-chrome">
                   <span className="fw-stage-chrome-left">
                     <i />
@@ -674,6 +876,7 @@ export default function LandingPage() {
               <button
                 type="button"
                 className="fw-arc-btn"
+                data-magnetic="8"
                 aria-label="Phân hệ trước"
                 onClick={() => setActiveArc((prev) => Math.max(0, prev - 1))}
               >
@@ -682,6 +885,7 @@ export default function LandingPage() {
               <button
                 type="button"
                 className="fw-arc-btn"
+                data-magnetic="8"
                 aria-label="Phân hệ tiếp theo"
                 onClick={() => setActiveArc((prev) => Math.min(arcModules.length - 1, prev + 1))}
               >
@@ -692,6 +896,7 @@ export default function LandingPage() {
 
           <div
             className="fw-arc-stage"
+            data-cursor="drag"
             onPointerDown={handleArcPointerDown}
             onPointerUp={handleArcPointerUp}
           >
@@ -753,7 +958,7 @@ export default function LandingPage() {
           <div className="fw-wireframe-grid">
             {wireframeSteps.map((step) => (
               <article key={step.code} className="fw-wire-card">
-                <div className="fw-wire-art" aria-hidden="true">
+                <div className="fw-wire-art fw-tilt-surface" data-tilt-card="6" data-cursor="view" aria-hidden="true">
                   {step.svg}
                 </div>
                 <h3>
@@ -772,7 +977,7 @@ export default function LandingPage() {
       {/* 6. Bidirectional Parallax Feature Split */}
       <section className="fw-section">
         <div className="fw-container fw-parallax-feature">
-          <div className="fw-parallax-media">
+          <div className="fw-parallax-media fw-tilt-surface" data-tilt-card="4" data-cursor="view">
             <div className="fw-parallax-inner">
               <img
                 src="/media/finworkshop-invoices.png"
