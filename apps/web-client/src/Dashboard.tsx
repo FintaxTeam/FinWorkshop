@@ -1,6 +1,6 @@
 import { useCallback,useEffect,useMemo,useRef,useState,type ReactNode } from 'react';
 import { Link,useSearchParams } from 'react-router-dom';
-import { AlertTriangle, ArrowDownLeft, ArrowLeftRight, ArrowRight, BarChart3, CalendarDays, CheckCircle2, CircleDollarSign, ClipboardList, Factory, FilePlus2, FileText, Landmark, LayoutGrid, RefreshCw, ShieldCheck, ShoppingCart, Wallet } from 'lucide-react';
+import { AlertTriangle, ArrowLeftRight, ArrowRight, BarChart3, CalendarDays, CheckCircle2, ChevronDown, ClipboardList, Factory, FilePlus2, FileText, Landmark, LayoutGrid, Plus, RefreshCw, ShieldCheck, ShoppingCart, Wallet } from 'lucide-react';
 import { Bar,CartesianGrid,Cell,ComposedChart,Legend,Line,Pie,PieChart,ResponsiveContainer,Tooltip,XAxis,YAxis } from 'recharts';
 import { api,actionRecord,formatDate,formatVnd,messageOf,today } from './api';
 import { Button,Card,StatusBadge,useToast } from './components';
@@ -13,33 +13,69 @@ type DashboardTab = 'overview' | 'charts' | 'operations';
 const dayShift = (day: string, count: number) => { const date = new Date(`${day}T12:00:00Z`); date.setUTCDate(date.getUTCDate() + count); return date.toISOString().slice(0,10); };
 const pathFor = (row: any) => `${({ invoices: '/invoices', transactions: '/transactions', quotations: '/quotations', 'stock-movements': '/inventory' } as Record<string,string>)[row.entity] || '/invoices'}?view=${encodeURIComponent(row.viewKey || row.code || row.id)}${row.entity === 'invoices' ? `&type=${row.direction}` : ''}`;
 
-function QuickActionsBar() {
+function QuickCreateMenu() {
   const { user } = useAuth();
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const close = (event: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', close);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, []);
+
   const items = user?.role === 'ACCOUNTANT' ? [
-    { to: '/invoices?new=1&type=OUTPUT', label: 'Hóa đơn bán', icon: FilePlus2, tone: 'text-emerald-700 bg-emerald-50 border-emerald-200 hover:bg-emerald-100/80' },
-    { to: '/invoices?new=1&type=INPUT', label: 'Hóa đơn mua', icon: ShoppingCart, tone: 'text-amber-700 bg-amber-50 border-amber-200 hover:bg-amber-100/80' },
-    { to: '/transactions?new=1', label: 'Ghi thu chi', icon: Wallet, tone: 'text-blue-700 bg-blue-50 border-blue-200 hover:bg-blue-100/80' },
-    { to: '/reconciliation', label: 'Khớp ngân hàng', icon: Landmark, tone: 'text-brand-700 bg-brand-50 border-brand-200 hover:bg-brand-100/80' },
+    { to: '/invoices?new=1&type=OUTPUT', label: 'Hóa đơn bán hàng', desc: 'Lập chứng từ bán ra & cấp mã CQT', icon: FilePlus2 },
+    { to: '/invoices?new=1&type=INPUT', label: 'Hóa đơn mua vào', desc: 'Ghi nhận chi phí & vật tư đầu vào', icon: ShoppingCart },
+    { to: '/transactions?new=1', label: 'Ghi sổ thu chi', desc: 'Thu tiền mặt hoặc chuyển khoản', icon: Wallet },
+    { to: '/reconciliation', label: 'Khớp sao kê ngân hàng', desc: 'Nhập CSV/XLSX và đối soát', icon: Landmark },
   ] : [
-    { to: '/invoices?new=1&type=OUTPUT', label: 'Bán hàng', icon: FilePlus2, tone: 'text-emerald-700 bg-emerald-50 border-emerald-200 hover:bg-emerald-100/80' },
-    { to: '/invoices?new=1&type=INPUT', label: 'Mua hàng', icon: ShoppingCart, tone: 'text-amber-700 bg-amber-50 border-amber-200 hover:bg-amber-100/80' },
-    { to: '/payments?new=1', label: 'Thu / Trả nợ', icon: ArrowLeftRight, tone: 'text-blue-700 bg-blue-50 border-blue-200 hover:bg-blue-100/80' },
-    { to: '/quotations?new=1', label: 'Lập báo giá', icon: FileText, tone: 'text-brand-700 bg-brand-50 border-brand-200 hover:bg-brand-100/80' },
+    { to: '/quotations?new=1', label: 'Lập báo giá mới', desc: 'Tính giá theo định mức sản xuất', icon: FileText },
+    { to: '/invoices?new=1&type=OUTPUT', label: 'Hóa đơn bán hàng', desc: 'Phát hành hóa đơn & ghi doanh thu', icon: FilePlus2 },
+    { to: '/invoices?new=1&type=INPUT', label: 'Hóa đơn mua vào', desc: 'Ghi nhận mua vật tư, dịch vụ', icon: ShoppingCart },
+    { to: '/payments?new=1', label: 'Phiếu thu / Trả nợ', desc: 'Gán thanh toán vào hóa đơn', icon: ArrowLeftRight },
   ];
 
   return (
-    <div aria-label="Thao tác nhanh" className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center">
-      <span className="hidden text-[11px] font-bold uppercase tracking-wider text-slate-400 mr-1 lg:inline">Tạo nhanh:</span>
-      {items.map((item) => (
-        <Link
-          key={item.to}
-          to={item.to}
-          className={`inline-flex items-center justify-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors ${item.tone}`}
+    <div ref={menuRef} className="relative">
+      <Button compact onClick={() => setOpen((v) => !v)} aria-expanded={open} aria-haspopup="menu">
+        <Plus size={14} />
+        <span>Tạo mới</span>
+        <ChevronDown size={13} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
+      </Button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 z-30 mt-2 w-64 rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl"
         >
-          <item.icon size={14} className="shrink-0" />
-          <span>{item.label}</span>
-        </Link>
-      ))}
+          {items.map((item) => (
+            <Link
+              key={item.to}
+              to={item.to}
+              role="menuitem"
+              onClick={() => setOpen(false)}
+              className="flex items-start gap-2.5 rounded-lg px-2.5 py-2 transition-colors hover:bg-slate-50"
+            >
+              <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-slate-600">
+                <item.icon size={14} />
+              </span>
+              <span className="min-w-0">
+                <span className="block text-xs font-semibold text-slate-900">{item.label}</span>
+                <span className="block text-[11px] text-slate-500">{item.desc}</span>
+              </span>
+            </Link>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -57,6 +93,7 @@ export function DashboardPage() {
   };
 
   const [data, setData] = useState<any>(null), [error, setError] = useState(''), [busy, setBusy] = useState(false), [syncing, setSyncing] = useState(false);
+  const [showCalmChecks, setShowCalmChecks] = useState(false);
   const [preset, setPreset] = useState('month'), [period, setPeriod] = useState({ from: `${today().slice(0,7)}-01`, to: today() }), [draft, setDraft] = useState(period), [chartRange, setChartRange] = useState('14');
   const { user } = useAuth(), toast = useToast();
   const requestVersion = useRef(0);
@@ -75,66 +112,77 @@ export function DashboardPage() {
   const retry = async () => { setSyncing(true); try { const { data } = await api.post('/integrations/odoo/sync-pending'); const count = data.results.filter((row: any) => row.status === 'SYNCED').length; toast(`Đã đồng bộ ${count}/${data.attempted} hồ sơ.`); await load(); } catch (error) { toast(messageOf(error),'error'); } finally { setSyncing(false); } };
   const approve = async (id: string) => { try { await actionRecord('quotations',id,'approve'); await load(); toast('Đã duyệt báo giá.'); } catch (error) { toast(messageOf(error),'error'); } };
   const markSent = async (id: string) => { try { await actionRecord('quotations',id,'mark-sent'); await load(); toast('Đã đánh dấu gửi báo giá cho khách.'); } catch (error) { toast(messageOf(error),'error'); } };
+
   const metrics = data?.metrics || {}, actions = data?.actions || {}, tax = data?.tax || {}, comparison = data?.comparison || {};
   const ticks = moneyTicks(Math.max(1,...(data?.trend || []).flatMap((row: any) => [row.thu,row.chi])));
   const costs = data?.expenseBreakdown || [], costTotal = costs.reduce((sum: number,row: any) => sum+row.amount,0);
   const agingTotal = Number(data?.aging?.current || 0)+Number(data?.aging?.overdue || 0);
 
+  const reviewTotal = Number(actions.reviewInvoiceCount || 0) + Number(actions.reconciliationCount || 0);
   const urgentCount =
     Number(actions.quotationCount || 0) +
     (user?.role !== 'OWNER' ? Number(actions.approvedQuoteCount || 0) + Number(actions.rejectedQuoteCount || 0) + Number(actions.acceptedQuoteCount || 0) : 0) +
     Number(actions.unclassifiedCount || 0) +
-    Number(actions.reviewInvoiceCount || 0) +
-    Number(actions.reconciliationCount || 0) +
+    reviewTotal +
     Number(actions.pendingOdoo || 0) +
     Number(data?.lowStock?.length || 0);
 
-  const tabs: Array<{ id: DashboardTab; label: string; icon: any; badge?: number; badgeTone?: string }> = [
-    {
-      id: 'overview',
-      label: 'Tổng quan & Tiền',
-      icon: LayoutGrid,
-      badge: urgentCount > 0 ? urgentCount : undefined,
-      badgeTone: 'bg-amber-100 text-amber-800 border-amber-200',
-    },
-    {
-      id: 'charts',
-      label: 'Biểu đồ & Phân tích',
-      icon: BarChart3,
-    },
-    {
-      id: 'operations',
-      label: 'Chứng từ & Tiến độ Xưởng',
-      icon: ClipboardList,
-      badge: data?.production?.length || undefined,
-      badgeTone: 'bg-slate-100 text-slate-700 border-slate-200',
-    },
+  // Split checklist items into "Needs attention (> 0)" and "All clear (=== 0)" for Option 1 focus
+  const checkItems = useMemo(() => {
+    const list: Array<{ key: string; count: number; label: string; to: string; action: string }> = [];
+    if (user?.role === 'OWNER') {
+      list.push({ key: 'q-pending', count: Number(actions.quotationCount || 0), label: 'Báo giá chờ duyệt', to: '/quotations?status=PENDING_APPROVAL', action: 'Xem báo giá' });
+      if (Number(actions.approvedQuoteCount || 0) > 0) {
+        list.push({ key: 'q-approved', count: Number(actions.approvedQuoteCount || 0), label: 'Báo giá đã duyệt · Chờ gửi khách', to: '/quotations?status=APPROVED', action: 'Xem' });
+      }
+    } else {
+      list.push({ key: 'q-approved', count: Number(actions.approvedQuoteCount || 0), label: 'Báo giá đã được Chủ xưởng duyệt · Cần gửi khách', to: '/quotations?status=APPROVED', action: 'Gửi khách' });
+      if (Number(actions.rejectedQuoteCount || 0) > 0) {
+        list.push({ key: 'q-rejected', count: Number(actions.rejectedQuoteCount || 0), label: 'Báo giá bị từ chối · Cần chỉnh sửa lại', to: '/quotations?status=REJECTED', action: 'Sửa lại' });
+      }
+      if (Number(actions.acceptedQuoteCount || 0) > 0) {
+        list.push({ key: 'q-accepted', count: Number(actions.acceptedQuoteCount || 0), label: 'Báo giá khách đã chốt · Cần tạo việc làm', to: '/quotations?status=ACCEPTED', action: 'Tạo việc làm' });
+      }
+      list.push({ key: 'q-pending', count: Number(actions.quotationCount || 0), label: 'Báo giá đang chờ Chủ xưởng duyệt', to: '/quotations?status=PENDING_APPROVAL', action: 'Theo dõi' });
+    }
+    list.push({ key: 'unclassified', count: Number(actions.unclassifiedCount || 0), label: 'Khoản thu chi chưa phân loại', to: '/transactions?q=UNCLASSIFIED', action: 'Phân loại' });
+    list.push({ key: 'review', count: reviewTotal, label: 'Hóa đơn / Khớp ngân hàng cần rà soát', to: '/invoices', action: 'Rà soát' });
+    return list;
+  }, [actions, reviewTotal, user?.role]);
+
+  const activeChecks = checkItems.filter((item) => item.count > 0);
+  const calmChecks = checkItems.filter((item) => item.count === 0);
+
+  const tabs: Array<{ id: DashboardTab; label: string; icon: any; badge?: number }> = [
+    { id: 'overview', label: 'Tổng quan & Tiền', icon: LayoutGrid, badge: urgentCount > 0 ? urgentCount : undefined },
+    { id: 'charts', label: 'Biểu đồ & Phân tích', icon: BarChart3 },
+    { id: 'operations', label: 'Chứng từ & Tiến độ Xưởng', icon: ClipboardList, badge: data?.production?.length || undefined },
   ];
 
   return <>
-    {/* Compact Executive Header Bar */}
-    <Card className="mb-4 p-3.5 sm:px-5 sm:py-3.5 bg-white">
+    {/* Restrained Executive Header Bar */}
+    <div className="mb-5 flex flex-col gap-3 border-b border-slate-200/90 pb-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div className="flex flex-wrap items-center gap-2.5">
-          <div>
-            <div className="flex flex-wrap items-center gap-2">
-              <h1 className="text-base font-bold tracking-tight text-slate-900 sm:text-lg">Xin chào, {user?.name || ''}</h1>
-              {roleName[user?.role || ''] && (
-                <span className="rounded-full border border-brand-200 bg-brand-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-brand-700">
-                  {roleName[user?.role || '']}
-                </span>
-              )}
-              <StatusBadge status={data?.period?.id ? data.period.status : 'DRAFT'} label={data?.period?.id ? data.period.status === 'LOCKED' ? 'Đã chốt sổ kỳ' : 'Kỳ đang mở' : 'Chưa thiết lập kỳ'}/>
-            </div>
-            <p className="mt-0.5 text-xs text-slate-500">
-              Số liệu từ {formatDate(period.from)} đến {formatDate(period.to)}
-            </p>
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="text-lg font-bold tracking-tight text-slate-900 sm:text-xl">
+              Xin chào, {user?.name || ''}
+            </h1>
+            {roleName[user?.role || ''] && (
+              <span className="rounded-md border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-semibold text-slate-600">
+                {roleName[user?.role || '']}
+              </span>
+            )}
+            <StatusBadge status={data?.period?.id ? data.period.status : 'DRAFT'} label={data?.period?.id ? data.period.status === 'LOCKED' ? 'Đã chốt sổ kỳ' : 'Kỳ đang mở' : 'Chưa thiết lập kỳ'}/>
           </div>
+          <p className="mt-0.5 text-xs text-slate-500">
+            Kỳ đối chiếu từ {formatDate(period.from)} đến {formatDate(period.to)}
+          </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <div className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50/70 px-2.5 py-1">
-            <CalendarDays size={14} className="text-brand-600 shrink-0"/>
+          <div className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5">
+            <CalendarDays size={14} className="text-slate-400 shrink-0"/>
             <select aria-label="Kỳ kế toán" value={preset} onChange={(event) => choosePeriod(event.target.value)} className="bg-transparent text-xs font-semibold text-slate-700 outline-none">
               <option value="month">Tháng này</option>
               <option value="quarter">Quý này</option>
@@ -143,202 +191,311 @@ export function DashboardPage() {
           </div>
           {preset === 'custom' && (
             <form onSubmit={(event) => { event.preventDefault(); if (draft.from && draft.to && draft.from <= draft.to) setPeriod(draft); }} className="flex flex-wrap items-center gap-1.5">
-              <input aria-label="Từ ngày" type="date" required value={draft.from} onChange={(event) => setDraft({ ...draft,from:event.target.value })} className="rounded-lg border border-slate-200 px-2 py-1 text-xs"/>
-              <input aria-label="Đến ngày" type="date" required min={draft.from} value={draft.to} onChange={(event) => setDraft({ ...draft,to:event.target.value })} className="rounded-lg border border-slate-200 px-2 py-1 text-xs"/>
+              <input aria-label="Từ ngày" type="date" required value={draft.from} onChange={(event) => setDraft({ ...draft,from:event.target.value })} className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"/>
+              <input aria-label="Đến ngày" type="date" required min={draft.from} value={draft.to} onChange={(event) => setDraft({ ...draft,to:event.target.value })} className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"/>
               <Button type="submit" compact>Áp dụng</Button>
             </form>
           )}
           <Button variant="secondary" compact onClick={() => void load()} disabled={busy}>
             <RefreshCw size={13} className={busy ? 'animate-spin' : ''}/>Làm mới
           </Button>
+          <QuickCreateMenu />
         </div>
       </div>
 
-      {/* Quick Actions + 3-Tab Switcher */}
-      <div className="mt-3 flex flex-col gap-3 border-t border-slate-100 pt-3 lg:flex-row lg:items-center lg:justify-between">
-        <div role="tablist" aria-label="Chế độ xem Dashboard" className="flex flex-wrap items-center gap-1.5 rounded-xl bg-slate-100/80 p-1">
-          {tabs.map((tab) => {
-            const isActive = activeTab === tab.id;
-            return (
-              <button
-                key={tab.id}
-                role="tab"
-                aria-selected={isActive}
-                onClick={() => setTab(tab.id)}
-                className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${
-                  isActive
-                    ? 'bg-white text-brand-700 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
-                }`}
-              >
-                <tab.icon size={14} className={isActive ? 'text-brand-600' : 'text-slate-400'} />
-                <span>{tab.label}</span>
-                {tab.badge !== undefined && (
-                  <span className={`ml-0.5 rounded-full border px-1.5 py-0.2 text-[10px] font-bold leading-4 ${tab.badgeTone}`}>
-                    {tab.badge}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-
-        <QuickActionsBar />
+      {/* Clean Tab Navigation */}
+      <div role="tablist" aria-label="Chế độ xem Dashboard" className="flex flex-wrap items-center gap-1">
+        {tabs.map((tab) => {
+          const isActive = activeTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              role="tab"
+              aria-selected={isActive}
+              onClick={() => setTab(tab.id)}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
+                isActive
+                  ? 'bg-slate-900 text-white'
+                  : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+              }`}
+            >
+              <tab.icon size={14} className={isActive ? 'text-white' : 'text-slate-400'} />
+              <span>{tab.label}</span>
+              {tab.badge !== undefined && (
+                <span className={`ml-0.5 rounded-full px-1.5 text-[10px] font-bold leading-4 ${
+                  isActive ? 'bg-white/20 text-white' : 'bg-slate-200/80 text-slate-700'
+                }`}>
+                  {tab.badge}
+                </span>
+              )}
+            </button>
+          );
+        })}
       </div>
-    </Card>
+    </div>
 
     {error && <p role="alert" className="mb-4 rounded-xl border border-red-200 bg-red-50 p-3.5 text-xs text-red-700">{error}</p>}
 
     {!data && !error ? (
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {Array.from({ length: 6 }, (_, index) => <div key={index} className="h-28 animate-pulse rounded-xl border border-slate-200 bg-white"/>)}
+      <div className="space-y-4">
+        <div className="h-32 animate-pulse rounded-xl border border-slate-200 bg-white"/>
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1.85fr)_minmax(290px,1fr)]">
+          <div className="h-72 animate-pulse rounded-xl border border-slate-200 bg-white"/>
+          <div className="h-72 animate-pulse rounded-xl border border-slate-200 bg-white"/>
+        </div>
       </div>
     ) : (
       <>
-        {/* TAB 1: TỔNG QUAN & TIỀN (6 Compact KPIs + Việc cần xử lý & Cảnh báo xưởng) */}
+        {/* TAB 1: TỔNG QUAN & TIỀN (OPTION 1: Executive Financial Strip + 65/35 Focus Layout) */}
         {activeTab === 'overview' && (
-          <div className="space-y-4">
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              <Kpi title="Tiền đang có (Quỹ & NH)" amount={metrics.balance} icon={<Wallet size={16}/>} to="/settings?tab=accounts" change={comparison.balance} tone="blue">
-                <Sub label="Quỹ tiền mặt" value={metrics.cashBalance}/>
-                <Sub label="Tài khoản ngân hàng" value={metrics.bankBalance}/>
-              </Kpi>
-              <Kpi title="Doanh thu bán hàng" amount={metrics.netRevenue} icon={<ArrowDownLeft size={16}/>} to="/invoices?type=OUTPUT" change={comparison.netRevenue} tone="green">
-                <Sub label="Thực thu trong kỳ" value={metrics.actualReceipts}/>
-              </Kpi>
-              <Kpi title="Chi phí & Giá vốn đã chi" amount={metrics.operatingCost} icon={<Factory size={16}/>} to="/reports?book=SME-GT" change={comparison.operatingCost} tone="amber">
-                <Sub label="Hóa đơn mua vào" value={metrics.inputInvoices}/>
-              </Kpi>
-              <Kpi title="Phải thu khách hàng" amount={metrics.receivable} icon={<CircleDollarSign size={16}/>} to="/invoices?type=OUTPUT" change={comparison.receivable} tone={metrics.overdueCount ? 'red' : 'blue'}>
-                <Sub label={`${metrics.overdueCount || 0} hóa đơn quá hạn`} value={metrics.overdueAmount} danger={metrics.overdueCount > 0}/>
-              </Kpi>
-              <Kpi title="Phải trả nhà cung cấp" amount={metrics.payable} icon={<Landmark size={16}/>} to="/invoices?type=INPUT" change={comparison.payable} tone="red">
-                <Sub label={`Đến hạn 7 ngày (${metrics.upcomingCount || 0} HĐ)`} value={metrics.upcomingAmount}/>
-              </Kpi>
-              <Kpi title="Thuế tạm tính trong kỳ" amount={metrics.taxLiability} icon={<ShieldCheck size={16}/>} to="/reports?book=SME-VAT" change={comparison.taxLiability} tone="indigo">
-                <Sub label="VAT đầu ra" value={tax.outputVat}/>
-                <Sub label={tax.personalIncome ? 'TNCN khoán' : 'VAT đầu vào được trừ'} value={tax.personalIncome || tax.inputVat}/>
-              </Kpi>
-            </div>
+          <div className="space-y-5">
+            {/* 1. Unified Executive Financial Strip */}
+            <Card className="overflow-hidden bg-white">
+              <div className="grid divide-y divide-slate-100 lg:grid-cols-[1.35fr_1fr_1fr_1fr_1fr] lg:divide-x lg:divide-y-0">
+                {/* Primary Hero Metric: Tiền đang có */}
+                <Link to="/settings?tab=accounts" className="group block p-5 transition-colors hover:bg-slate-50/70">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Tiền đang có (Quỹ &amp; NH)</span>
+                    <ChangePill change={comparison.balance} />
+                  </div>
+                  <p className="mt-2 text-2xl font-bold tracking-tight text-slate-950 tabular-nums sm:text-[26px]">
+                    {formatVnd(metrics.balance)}
+                  </p>
+                  <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-slate-100 pt-2.5 text-xs text-slate-500">
+                    <span>Quỹ mặt: <strong className="font-semibold text-slate-800 tabular-nums">{formatVnd(metrics.cashBalance)}</strong></span>
+                    <span>Ngân hàng: <strong className="font-semibold text-slate-800 tabular-nums">{formatVnd(metrics.bankBalance)}</strong></span>
+                  </div>
+                </Link>
 
-            <div className="grid items-start gap-4 lg:grid-cols-2">
-              <Card className="overflow-hidden">
-                <WidgetHeader icon={<AlertTriangle size={15}/>} title="Cần xử lý ngay"/>
+                {/* Secondary Strip Metric 1: Doanh thu */}
+                <StripMetric
+                  title="Doanh thu bán hàng"
+                  amount={metrics.netRevenue}
+                  change={comparison.netRevenue}
+                  to="/invoices?type=OUTPUT"
+                  subLabel="Thực thu trong kỳ"
+                  subValue={metrics.actualReceipts}
+                />
+
+                {/* Secondary Strip Metric 2: Chi phí */}
+                <StripMetric
+                  title="Chi phí & Giá vốn"
+                  amount={metrics.operatingCost}
+                  change={comparison.operatingCost}
+                  to="/reports?book=SME-GT"
+                  subLabel="Hóa đơn mua vào"
+                  subValue={metrics.inputInvoices}
+                />
+
+                {/* Secondary Strip Metric 3: Phải thu */}
+                <StripMetric
+                  title="Phải thu khách hàng"
+                  amount={metrics.receivable}
+                  change={comparison.receivable}
+                  to="/invoices?type=OUTPUT"
+                  subLabel={`${metrics.overdueCount || 0} hóa đơn quá hạn`}
+                  subValue={metrics.overdueAmount}
+                  danger={Number(metrics.overdueCount || 0) > 0}
+                />
+
+                {/* Secondary Strip Metric 4: Phải trả */}
+                <StripMetric
+                  title="Phải trả NCC"
+                  amount={metrics.payable}
+                  change={comparison.payable}
+                  to="/invoices?type=INPUT"
+                  subLabel={`Đến hạn 7 ngày (${metrics.upcomingCount || 0} HĐ)`}
+                  subValue={metrics.upcomingAmount}
+                />
+              </div>
+            </Card>
+
+            {/* 2. Asymmetric 65% / 35% Operational Grid */}
+            <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1.85fr)_minmax(300px,1fr)]">
+              {/* LEFT (65%): Focused Action Inbox */}
+              <Card className="overflow-hidden bg-white">
+                <WidgetHeader
+                  icon={<AlertTriangle size={15}/>}
+                  title="Cần xử lý ngay"
+                  right={
+                    <span className="text-[11px] font-semibold text-slate-500">
+                      {activeChecks.length > 0 ? `${activeChecks.length} nhóm có việc cần làm` : 'Không có đầu việc tồn đọng'}
+                    </span>
+                  }
+                />
+
                 <div className="divide-y divide-slate-100">
-                  {user?.role === 'OWNER' ? (
-                    <>
-                      <Task count={actions.quotationCount} label="Báo giá chờ duyệt" to="/quotations?status=PENDING_APPROVAL" action="Xem báo giá"/>
-                      {actions.pendingQuotes?.map((quote: any) => (
-                        <div key={quote.id} className="flex items-center justify-between gap-2 bg-amber-50/70 px-4 py-2 border-b border-amber-100">
-                          <div className="min-w-0">
-                            <span className="block truncate text-xs font-bold text-amber-900">{quote.code} · {quote.customerName}</span>
-                            <span className="block truncate text-[11px] text-amber-700">{quote.title} ({formatVnd(quote.total)})</span>
-                          </div>
-                          <Button className="shrink-0" compact onClick={() => void approve(quote.id)}>Duyệt ngay</Button>
+                  {/* Inline High-Priority Quote Actions */}
+                  {user?.role === 'OWNER' && actions.pendingQuotes?.map((quote: any) => (
+                    <div key={quote.id} className="flex items-center justify-between gap-3 bg-amber-50/50 px-5 py-3">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="h-2 w-2 shrink-0 rounded-full bg-amber-500" />
+                          <span className="truncate text-xs font-bold text-slate-900">{quote.code} · {quote.customerName}</span>
                         </div>
-                      ))}
-                      {Number(actions.approvedQuoteCount) > 0 && (
-                        <Task count={actions.approvedQuoteCount} label="Báo giá đã duyệt · Chờ gửi khách" to="/quotations?status=APPROVED" action="Xem"/>
-                      )}
-                    </>
-                  ) : (
-                    <>
-                      <Task count={actions.approvedQuoteCount} label="Báo giá đã được Chủ xưởng duyệt · Cần gửi khách" to="/quotations?status=APPROVED" action="Gửi khách"/>
-                      {actions.approvedQuotes?.map((quote: any) => (
-                        <div key={quote.id} className="flex items-center justify-between gap-2 bg-emerald-50/80 px-4 py-2 border-b border-emerald-100">
-                          <div className="min-w-0">
-                            <span className="block truncate text-xs font-bold text-emerald-900">✓ Đã duyệt: {quote.code} · {quote.customerName}</span>
-                            <span className="block truncate text-[11px] text-emerald-700">{quote.title} · {formatVnd(quote.total)}</span>
-                          </div>
-                          <Button variant="secondary" className="shrink-0" compact onClick={() => void markSent(quote.id)}>Đã gửi khách</Button>
-                        </div>
-                      ))}
-                      {Number(actions.rejectedQuoteCount) > 0 && (
-                        <>
-                          <Task count={actions.rejectedQuoteCount} label="Báo giá bị từ chối · Cần chỉnh sửa lại" to="/quotations?status=REJECTED" action="Sửa lại"/>
-                          {actions.rejectedQuotes?.map((quote: any) => (
-                            <Link key={quote.id} to={`/quotations?status=REJECTED&view=${encodeURIComponent(quote.code)}`} className="block bg-rose-50/80 px-4 py-2 border-b border-rose-100 hover:bg-rose-100/70 transition-colors">
-                              <span className="block truncate text-xs font-bold text-rose-900">✕ Bị từ chối: {quote.code} · {quote.customerName}</span>
-                              {quote.rejectionNote && <span className="block truncate text-[11px] text-rose-700">Lý do: {quote.rejectionNote}</span>}
-                            </Link>
-                          ))}
-                        </>
-                      )}
-                      {Number(actions.acceptedQuoteCount) > 0 && (
-                        <Task count={actions.acceptedQuoteCount} label="Báo giá khách đã chốt · Cần tạo việc làm" to="/quotations?status=ACCEPTED" action="Tạo việc làm"/>
-                      )}
-                      <Task count={actions.quotationCount} label="Báo giá đang chờ Chủ xưởng duyệt" to="/quotations?status=PENDING_APPROVAL" action="Theo dõi"/>
-                    </>
+                        <p className="mt-0.5 truncate pl-4 text-xs text-slate-600">
+                          {quote.title} · <strong className="tabular-nums text-slate-900">{formatVnd(quote.total)}</strong>
+                        </p>
+                      </div>
+                      <Button className="shrink-0" compact onClick={() => void approve(quote.id)}>Duyệt ngay</Button>
+                    </div>
+                  ))}
+
+                  {user?.role !== 'OWNER' && actions.approvedQuotes?.map((quote: any) => (
+                    <div key={quote.id} className="flex items-center justify-between gap-3 bg-emerald-50/50 px-5 py-3">
+                      <div className="min-w-0">
+                        <span className="block truncate text-xs font-bold text-slate-900">Đã duyệt · {quote.code} ({quote.customerName})</span>
+                        <span className="block truncate text-xs text-slate-600">{quote.title} · {formatVnd(quote.total)}</span>
+                      </div>
+                      <Button variant="secondary" className="shrink-0" compact onClick={() => void markSent(quote.id)}>Đã gửi khách</Button>
+                    </div>
+                  ))}
+
+                  {user?.role !== 'OWNER' && actions.rejectedQuotes?.map((quote: any) => (
+                    <Link key={quote.id} to={`/quotations?status=REJECTED&view=${encodeURIComponent(quote.code)}`} className="block bg-rose-50/50 px-5 py-3 hover:bg-rose-50 transition-colors">
+                      <span className="block truncate text-xs font-bold text-rose-900">Bị từ chối · {quote.code} ({quote.customerName})</span>
+                      {quote.rejectionNote && <span className="mt-0.5 block truncate text-xs text-rose-700">Lý do: {quote.rejectionNote}</span>}
+                    </Link>
+                  ))}
+
+                  {/* Active Tasks (count > 0) */}
+                  {activeChecks.map((item) => (
+                    <Task key={item.key} count={item.count} label={item.label} to={item.to} action={item.action} />
+                  ))}
+
+                  {activeChecks.length === 0 && (
+                    <div className="flex items-center gap-3 px-5 py-6 text-slate-600">
+                      <CheckCircle2 size={18} className="shrink-0 text-emerald-600" />
+                      <div>
+                        <p className="text-sm font-semibold text-slate-900">Mọi đầu việc kế toán &amp; báo giá đều đang sạch sẽ</p>
+                        <p className="mt-0.5 text-xs text-slate-500">Không có báo giá chờ duyệt, khoản chưa phân loại hay hóa đơn tồn đọng.</p>
+                      </div>
+                    </div>
                   )}
-                  <Task count={actions.unclassifiedCount} label="Khoản thu chi chưa phân loại" to="/transactions?q=UNCLASSIFIED" action="Phân loại"/>
-                  <Task count={Number(actions.reviewInvoiceCount || 0)+Number(actions.reconciliationCount || 0)} label="Hóa đơn / Khớp ngân hàng cần rà soát" to="/invoices" action="Rà soát"/>
-                  <div className="flex items-center gap-3 px-4 py-3">
-                    <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-xs font-bold ${actions.pendingOdoo ? 'bg-rose-50 text-rose-700 border border-rose-200' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'}`}>{actions.pendingOdoo || 0}</span>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-xs font-semibold text-slate-800">Hồ sơ chờ đồng bộ Odoo</p>
-                      <p className="mt-0.5 text-[10px] text-slate-400">{data?.integrations?.odoo?.connected ? 'Odoo ERP Online · Đồng bộ ổn định' : 'Mất kết nối · Đang chờ thử lại'}</p>
+
+                  {/* Calm / Zero-count checks neatly tucked into a collapsible footer */}
+                  {calmChecks.length > 0 && (
+                    <div className="bg-slate-50/70 px-5 py-2.5">
+                      <button
+                        type="button"
+                        onClick={() => setShowCalmChecks((v) => !v)}
+                        className="flex w-full items-center justify-between text-left text-xs font-medium text-slate-500 hover:text-slate-800"
+                      >
+                        <span className="inline-flex items-center gap-2">
+                          <CheckCircle2 size={14} className="text-emerald-600" />
+                          {calmChecks.length} mục kiểm tra khác đang ổn định (0 tồn đọng)
+                        </span>
+                        <ChevronDown size={14} className={`transition-transform ${showCalmChecks ? 'rotate-180' : ''}`} />
+                      </button>
+                      {showCalmChecks && (
+                        <div className="mt-2 divide-y divide-slate-200/70 border-t border-slate-200/70 pt-1">
+                          {calmChecks.map((item) => (
+                            <div key={item.key} className="flex items-center justify-between py-2 text-xs text-slate-500">
+                              <span>{item.label}</span>
+                              <Link to={item.to} className="font-semibold text-slate-700 hover:text-brand-700">{item.action} →</Link>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </Card>
+
+              {/* RIGHT (35%): Compact Rail — Tax, Workshop & Inventory, Odoo Sync */}
+              <div className="space-y-4">
+                {/* Tax Liability Card (Preserves 6th KPI cleanly) */}
+                <Card className="bg-white p-4">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                      <ShieldCheck size={14} className="text-slate-400" />Thuế tạm tính trong kỳ
+                    </span>
+                    <Link to="/reports?book=SME-VAT" className="text-xs font-semibold text-brand-700 hover:underline">Sổ thuế →</Link>
+                  </div>
+                  <div className="mt-2 flex items-baseline justify-between gap-2">
+                    <p className="text-xl font-bold tracking-tight text-slate-900 tabular-nums">{formatVnd(metrics.taxLiability)}</p>
+                    <ChangePill change={comparison.taxLiability} />
+                  </div>
+                  <div className="mt-2.5 space-y-1 border-t border-slate-100 pt-2.5">
+                    <Sub label="VAT đầu ra" value={tax.outputVat}/>
+                    <Sub label={tax.personalIncome ? 'TNCN khoán' : 'VAT đầu vào được trừ'} value={tax.personalIncome || tax.inputVat}/>
+                  </div>
+                </Card>
+
+                {/* Workshop & Inventory Summary */}
+                <Card className="overflow-hidden bg-white">
+                  <WidgetHeader
+                    icon={<Factory size={15}/>}
+                    title="Xưởng & Tồn kho"
+                    right={<button onClick={() => setTab('operations')} className="text-[11px] font-semibold text-brand-700 hover:underline">Xem tất cả →</button>}
+                  />
+                  <div className="space-y-3 p-4">
+                    {data?.lowStock?.length ? (
+                      <div className="space-y-1.5">
+                        {data.lowStock.map((row: any) => (
+                          <Link key={row.id} to={`/catalog?tab=materials&view=${encodeURIComponent(row.viewKey || row.code || row.id)}`} className="flex items-center gap-2 rounded-lg border border-rose-200/80 bg-rose-50/70 px-3 py-2 text-rose-900 hover:bg-rose-100/60 transition-colors">
+                            <AlertTriangle size={13} className="shrink-0 text-rose-600"/>
+                            <span className="min-w-0 flex-1 truncate text-xs font-semibold">{row.name}</span>
+                            <span className="whitespace-nowrap text-xs font-bold tabular-nums">{formatNumber(row.stock)} / {formatNumber(row.minStock)} {row.unit}</span>
+                          </Link>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                        <CheckCircle2 size={14} className="shrink-0 text-emerald-600"/>
+                        <span>Tồn kho vật tư đang ở mức an toàn.</span>
+                      </div>
+                    )}
+
+                    <div className="divide-y divide-slate-100">
+                      {data?.production?.length ? data.production.slice(0, 3).map((job: any) => (
+                        <Link key={job.id} to={`/workshop?view=${encodeURIComponent(job.code)}`} className="block py-2.5 first:pt-0 last:pb-0 group">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="truncate text-xs font-semibold text-slate-800 group-hover:text-brand-700">{job.productName} <span className="text-slate-400 font-normal">({job.code})</span></span>
+                            <span className="text-xs font-bold text-slate-700 tabular-nums">{formatNumber(job.progress)}%</span>
+                          </div>
+                          <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-slate-100">
+                            <div className="h-full rounded-full bg-slate-800 transition-all group-hover:bg-brand-600" style={{ width:`${job.progress || 0}%` }}/>
+                          </div>
+                        </Link>
+                      )) : <p className="py-1 text-xs text-slate-400">Không có lệnh đang sản xuất.</p>}
+                    </div>
+                  </div>
+                </Card>
+
+                {/* Odoo ERP Sync Health */}
+                <Card className="bg-white p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className={`h-2 w-2 rounded-full ${data?.integrations?.odoo?.connected ? 'bg-emerald-500' : 'bg-rose-500'}`} />
+                        <p className="text-xs font-semibold text-slate-900">Đồng bộ Odoo ERP</p>
+                      </div>
+                      <p className="mt-0.5 text-[11px] text-slate-500">
+                        {actions.pendingOdoo ? `${actions.pendingOdoo} hồ sơ đang chờ đồng bộ` : data?.integrations?.odoo?.connected ? 'Trực tuyến · Không có hồ sơ tồn' : 'Mất kết nối · Đang chờ thử lại'}
+                      </p>
                     </div>
                     {user?.role === 'OWNER' ? (
                       <Button variant="secondary" compact disabled={syncing || !data?.integrations?.odoo?.connected || !actions.pendingOdoo} onClick={() => void retry()}>
                         <RefreshCw size={12} className={syncing ? 'animate-spin' : ''}/>Thử lại
                       </Button>
                     ) : (
-                      <Link to="/settings?tab=integrations" className="text-xs font-semibold text-brand-700">Chi tiết</Link>
+                      <Link to="/settings?tab=integrations" className="text-xs font-semibold text-brand-700 hover:underline">Chi tiết</Link>
                     )}
                   </div>
-                </div>
-              </Card>
-
-              <Card className="overflow-hidden">
-                <WidgetHeader
-                  icon={<Factory size={15}/>}
-                  title="Cảnh báo tồn kho & Lệnh sản xuất"
-                  right={<button onClick={() => setTab('operations')} className="text-[11px] font-semibold text-brand-700 hover:underline">Xem tất cả →</button>}
-                />
-                <div className="space-y-2.5 p-4">
-                  {data?.lowStock?.length ? (
-                    <div className="space-y-2">
-                      {data.lowStock.map((row: any) => (
-                        <Link key={row.id} to={`/catalog?tab=materials&view=${encodeURIComponent(row.viewKey || row.code || row.id)}`} className="flex items-center gap-2 rounded-lg border border-rose-200 bg-rose-50/80 px-3 py-2 text-rose-800 hover:bg-rose-100/70 transition-colors">
-                          <AlertTriangle size={14} className="shrink-0 text-rose-600"/>
-                          <span className="min-w-0 flex-1 truncate text-xs font-semibold">{row.name}</span>
-                          <span className="whitespace-nowrap text-xs font-bold tabular-nums">{formatNumber(row.stock)} / {formatNumber(row.minStock)} {row.unit}</span>
-                        </Link>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50/70 px-3 py-2 text-xs font-medium text-emerald-800">
-                      <CheckCircle2 size={14} className="shrink-0 text-emerald-600"/>
-                      <span>Tồn kho vật tư đang ở mức an toàn.</span>
-                    </div>
-                  )}
-
-                  <div className="divide-y divide-slate-100 pt-1">
-                    {data?.production?.length ? data.production.slice(0, 3).map((job: any) => (
-                      <Link key={job.id} to={`/workshop?view=${encodeURIComponent(job.code)}`} className="block py-2 first:pt-0 last:pb-0 group">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="truncate text-xs font-semibold text-slate-800 group-hover:text-brand-700">{job.productName} <span className="text-slate-400 font-normal">({job.code})</span></span>
-                          <span className="text-xs font-bold text-brand-700 tabular-nums">{formatNumber(job.progress)}%</span>
-                        </div>
-                        <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-slate-100">
-                          <div className="h-full rounded-full bg-brand-600 transition-all" style={{ width:`${job.progress || 0}%` }}/>
-                        </div>
-                      </Link>
-                    )) : <p className="py-2 text-xs text-slate-400">Không có lệnh đang sản xuất.</p>}
-                  </div>
-                </div>
-              </Card>
+                </Card>
+              </div>
             </div>
           </div>
         )}
 
-        {/* TAB 2: BIỂU ĐỒ & PHÂN TÍCH TÀI CHÍNH */}
+        {/* TAB 2: BIỂU ĐỒ & PHÂN TÍCH TÀI CHÍNH (Kept intact) */}
         {activeTab === 'charts' && (
           <div className="grid gap-4 lg:grid-cols-[minmax(0,1.75fr)_minmax(290px,1fr)]">
             <Card className="min-w-0 p-4 sm:p-5">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <h2 className="text-sm font-bold text-slate-900 sm:text-base">Dòng tiền thu – chi & Số dư lũy kế</h2>
+                  <h2 className="text-sm font-bold text-slate-900 sm:text-base">Dòng tiền thu – chi &amp; Số dư lũy kế</h2>
                   <p className="mt-0.5 text-xs text-slate-500">{formatDate(data?.chartFrom)} – {formatDate(data?.chartTo)}</p>
                 </div>
                 <div className="flex rounded-lg border border-slate-200 bg-slate-50 p-0.5">
@@ -374,7 +531,7 @@ export function DashboardPage() {
             <div className="grid gap-4 content-start">
               <Card className="p-4">
                 <div className="flex items-center justify-between">
-                  <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500">Cơ cấu chi phí & Thuế</h2>
+                  <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500">Cơ cấu chi phí &amp; Thuế</h2>
                   <span className="text-[10px] text-slate-400">Trong kỳ</span>
                 </div>
                 {costs.length ? <>
@@ -417,46 +574,10 @@ export function DashboardPage() {
           </div>
         )}
 
-        {/* TAB 3: CHỨNG TỪ & TIẾN ĐỘ XƯỞNG */}
+        {/* TAB 3: CHỨNG TỪ & TIẾN ĐỘ XƯỞNG (60% Compact Document Table / 40% Workshop Progress) */}
         {activeTab === 'operations' && (
-          <div className="grid items-start gap-4 lg:grid-cols-2">
-            <Card className="overflow-hidden">
-              <WidgetHeader
-                icon={<Factory size={15}/>}
-                title="Tiến độ xưởng & Cảnh báo tồn kho"
-                right={<Link to="/workshop" className="text-[11px] font-semibold text-brand-700 hover:underline">Quản lý xưởng →</Link>}
-              />
-              <div className="space-y-3.5 p-4">
-                {data?.production?.length ? data.production.map((job: any) => (
-                  <Link key={job.id} to={`/workshop?view=${encodeURIComponent(job.code)}`} className="block group rounded-lg border border-slate-100 p-2.5 hover:border-slate-200 hover:bg-slate-50/50 transition-colors">
-                    <div className="flex justify-between gap-2">
-                      <div className="min-w-0">
-                        <p className="truncate text-xs font-bold text-slate-800 group-hover:text-brand-700 transition-colors">{job.productName}</p>
-                        <p className="mt-0.5 text-[10px] text-slate-400">{job.code} · {job.stage}</p>
-                      </div>
-                      <span className="text-xs font-bold text-brand-700">{formatNumber(job.progress)}%</span>
-                    </div>
-                    <div className="my-1.5 h-1.5 overflow-hidden rounded-full bg-slate-100">
-                      <div className="h-full rounded-full bg-brand-600 transition-all" style={{ width:`${job.progress || 0}%` }}/>
-                    </div>
-                    <p className="flex justify-between text-[10px] text-slate-400">
-                      <span>{formatNumber(job.laborHours)} giờ công</span>
-                      <span>Hạn {formatDate(job.dueDate)}</span>
-                    </p>
-                  </Link>
-                )) : <p className="text-xs text-slate-400">Không có lệnh đang sản xuất.</p>}
-
-                {data?.lowStock?.map((row: any) => (
-                  <Link key={row.id} to={`/catalog?tab=materials&view=${encodeURIComponent(row.viewKey || row.code || row.id)}`} className="flex items-center gap-2 rounded-lg border border-rose-200 bg-rose-50/80 px-3 py-2 text-rose-800">
-                    <AlertTriangle size={14} className="shrink-0 text-rose-600"/>
-                    <span className="min-w-0 flex-1 truncate text-xs font-semibold">{row.name}</span>
-                    <span className="whitespace-nowrap text-xs font-bold tabular-nums">{formatNumber(row.stock)} / {formatNumber(row.minStock)} {row.unit}</span>
-                  </Link>
-                ))}
-              </div>
-            </Card>
-
-            <Card className="overflow-hidden">
+          <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1.45fr)_minmax(290px,1fr)]">
+            <Card className="overflow-hidden bg-white">
               <WidgetHeader
                 icon={<FileText size={15}/>}
                 title="Chứng từ phát sinh gần nhất"
@@ -464,19 +585,72 @@ export function DashboardPage() {
               />
               <div className="divide-y divide-slate-100">
                 {data?.recentDocuments?.map((row: any) => (
-                  <Link key={`${row.entity}-${row.id}`} to={pathFor(row)} className="block px-4 py-3 hover:bg-slate-50/80 transition-colors">
-                    <div className="flex items-start justify-between gap-2">
-                      <span className="text-xs font-bold text-slate-900">{row.code}</span>
-                      <span className={`whitespace-nowrap text-xs font-bold tabular-nums ${['INPUT','EXPENSE','WASTE'].includes(row.direction) ? 'text-rose-700' : 'text-emerald-700'}`}>{formatVnd(row.total)}</span>
+                  <Link
+                    key={`${row.entity}-${row.id}`}
+                    to={pathFor(row)}
+                    className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-5 py-3 hover:bg-slate-50/80 transition-colors sm:grid-cols-[minmax(0,1.4fr)_auto_auto]"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-slate-900">{row.code}</span>
+                        <span className="text-[11px] text-slate-400">· {formatDate(row.date)}</span>
+                      </div>
+                      <p className="mt-0.5 truncate text-xs text-slate-500">{row.counterparty || 'Chứng từ nội bộ'}</p>
                     </div>
-                    <p className="mt-0.5 truncate text-[11px] text-slate-500">{row.counterparty || 'Chứng từ nội bộ'}</p>
-                    <div className="mt-1.5 flex items-center justify-between gap-2">
-                      <span className="text-[10px] text-slate-400">{formatDate(row.date)}</span>
+                    <div className="hidden sm:block">
                       <StatusBadge status={row.status}/>
+                    </div>
+                    <div className="text-right">
+                      <span className={`block whitespace-nowrap text-xs font-bold tabular-nums ${['INPUT','EXPENSE','WASTE'].includes(row.direction) ? 'text-rose-700' : 'text-slate-900'}`}>
+                        {['INPUT','EXPENSE','WASTE'].includes(row.direction) ? '−' : '+'}{formatVnd(row.total)}
+                      </span>
+                      <span className="mt-1 inline-block sm:hidden"><StatusBadge status={row.status}/></span>
                     </div>
                   </Link>
                 ))}
-                {!data?.recentDocuments?.length && <p className="px-4 py-8 text-center text-xs text-slate-400">Chưa có chứng từ.</p>}
+                {!data?.recentDocuments?.length && <p className="px-5 py-10 text-center text-xs text-slate-400">Chưa có chứng từ phát sinh trong kỳ.</p>}
+              </div>
+            </Card>
+
+            <Card className="overflow-hidden bg-white">
+              <WidgetHeader
+                icon={<Factory size={15}/>}
+                title="Tiến độ xưởng & Cảnh báo tồn kho"
+                right={<Link to="/workshop" className="text-[11px] font-semibold text-brand-700 hover:underline">Quản lý xưởng →</Link>}
+              />
+              <div className="space-y-3 p-4">
+                {data?.lowStock?.length > 0 && (
+                  <div className="space-y-1.5 border-b border-slate-100 pb-3">
+                    {data.lowStock.map((row: any) => (
+                      <Link key={row.id} to={`/catalog?tab=materials&view=${encodeURIComponent(row.viewKey || row.code || row.id)}`} className="flex items-center gap-2 rounded-lg border border-rose-200/80 bg-rose-50/70 px-3 py-2 text-rose-900">
+                        <AlertTriangle size={13} className="shrink-0 text-rose-600"/>
+                        <span className="min-w-0 flex-1 truncate text-xs font-semibold">{row.name}</span>
+                        <span className="whitespace-nowrap text-xs font-bold tabular-nums">{formatNumber(row.stock)} / {formatNumber(row.minStock)} {row.unit}</span>
+                      </Link>
+                    ))}
+                  </div>
+                )}
+
+                <div className="divide-y divide-slate-100">
+                  {data?.production?.length ? data.production.map((job: any) => (
+                    <Link key={job.id} to={`/workshop?view=${encodeURIComponent(job.code)}`} className="block py-3 first:pt-0 last:pb-0 group">
+                      <div className="flex justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="truncate text-xs font-bold text-slate-800 group-hover:text-brand-700 transition-colors">{job.productName}</p>
+                          <p className="mt-0.5 text-[11px] text-slate-500">{job.code} · {job.stage}</p>
+                        </div>
+                        <span className="text-xs font-bold text-slate-900 tabular-nums">{formatNumber(job.progress)}%</span>
+                      </div>
+                      <div className="my-2 h-1.5 overflow-hidden rounded-full bg-slate-100">
+                        <div className="h-full rounded-full bg-slate-800 transition-all group-hover:bg-brand-600" style={{ width:`${job.progress || 0}%` }}/>
+                      </div>
+                      <p className="flex justify-between text-[11px] text-slate-400">
+                        <span>{formatNumber(job.laborHours)} giờ công</span>
+                        <span>Hạn {formatDate(job.dueDate)}</span>
+                      </p>
+                    </Link>
+                  )) : <p className="text-xs text-slate-400">Không có lệnh đang sản xuất.</p>}
+                </div>
               </div>
             </Card>
           </div>
@@ -486,28 +660,53 @@ export function DashboardPage() {
   </>;
 }
 
-function Kpi({ title, amount, icon, to, change, tone, children }: { title: string; amount: unknown; icon: ReactNode; to: string; change?: any; tone: 'blue'|'green'|'amber'|'red'|'indigo'; children: ReactNode }) {
-  const colors = {
-    blue:'bg-blue-50 text-blue-700 border border-blue-100',
-    green:'bg-emerald-50 text-emerald-700 border border-emerald-100',
-    amber:'bg-amber-50 text-amber-700 border border-amber-100',
-    red:'bg-rose-50 text-rose-700 border border-rose-100',
-    indigo:'bg-indigo-50 text-indigo-700 border border-indigo-100'
-  };
-  return <Link to={to} className="group rounded-xl border border-slate-200/80 bg-white p-3.5 shadow-soft transition-all duration-150 hover:border-slate-300 hover:shadow-lift">
-    <div className="flex items-center justify-between gap-2">
-      <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 truncate">{title}</p>
-      <span className={`rounded-lg p-1.5 shrink-0 ${colors[tone]}`}>{icon}</span>
-    </div>
-    <div className="mt-1.5 flex items-baseline justify-between gap-2">
-      <p className={`text-xl font-bold tracking-tight tabular-nums ${tone === 'red' ? 'text-rose-700' : 'text-slate-900'}`}>{formatVnd(amount)}</p>
-      <span className={`text-[11px] shrink-0 flex items-center gap-1 ${change?.change == null ? 'text-slate-400' : change.change >= 0 ? 'font-bold text-emerald-700' : 'font-bold text-rose-700'}`}>
-        {change?.change == null ? 'Mới' : `${change.change > 0 ? '+' : ''}${formatNumber(change.change)}%`}
-        <ArrowRight size={12} className="text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-brand-600"/>
-      </span>
-    </div>
-    <div className="mt-2 border-t border-slate-100 pt-2 space-y-1">{children}</div>
-  </Link>;
+function ChangePill({ change }: { change?: any }) {
+  if (change?.change == null) return <span className="text-[11px] font-medium text-slate-400">Mới</span>;
+  const positive = change.change >= 0;
+  return (
+    <span className={`text-[11px] font-semibold tabular-nums ${positive ? 'text-emerald-700' : 'text-rose-700'}`}>
+      {change.change > 0 ? '+' : ''}{formatNumber(change.change)}%
+    </span>
+  );
+}
+
+function StripMetric({
+  title,
+  amount,
+  change,
+  to,
+  subLabel,
+  subValue,
+  danger = false,
+}: {
+  title: string;
+  amount: unknown;
+  change?: any;
+  to: string;
+  subLabel: string;
+  subValue: unknown;
+  danger?: boolean;
+}) {
+  return (
+    <Link to={to} className="group flex flex-col justify-between p-4 sm:p-5 transition-colors hover:bg-slate-50/70">
+      <div>
+        <div className="flex items-center justify-between gap-2">
+          <span className="truncate text-[11px] font-semibold uppercase tracking-wider text-slate-500">{title}</span>
+          <ArrowRight size={13} className="shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-slate-700" />
+        </div>
+        <div className="mt-2 flex items-baseline justify-between gap-2">
+          <p className={`text-lg font-bold tracking-tight tabular-nums ${danger ? 'text-rose-700' : 'text-slate-900'}`}>
+            {formatVnd(amount)}
+          </p>
+          <ChangePill change={change} />
+        </div>
+      </div>
+      <div className="mt-3 flex items-center justify-between gap-2 border-t border-slate-100 pt-2.5 text-[11px]">
+        <span className={`truncate ${danger ? 'font-medium text-rose-700' : 'text-slate-500'}`}>{subLabel}</span>
+        <span className={`whitespace-nowrap font-semibold tabular-nums ${danger ? 'text-rose-700' : 'text-slate-700'}`}>{formatVnd(subValue)}</span>
+      </div>
+    </Link>
+  );
 }
 
 function Sub({ label, value, danger = false }: { label: string; value: unknown; danger?: boolean }) {
@@ -525,20 +724,20 @@ function ChartTotal({ label, value, tone }: { label: string; value: unknown; ton
 }
 
 function WidgetHeader({ icon, title, right }: { icon: ReactNode; title: string; right?: ReactNode }) {
-  return <div className="flex items-center justify-between border-b border-slate-100 bg-white px-4 py-2.5">
+  return <div className="flex items-center justify-between border-b border-slate-100 bg-white px-5 py-3">
     <h2 className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-700">
-      <span className="text-brand-600">{icon}</span>{title}
+      <span className="text-slate-400">{icon}</span>{title}
     </h2>
     {right}
   </div>;
 }
 
 function Task({ count = 0, label, to, action }: { count?: number; label: string; to: string; action: string }) {
-  return <div className="flex items-center gap-3 px-4 py-2.5 hover:bg-slate-50/60 transition-colors">
-    <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-xs font-bold ${count ? 'bg-amber-50 text-amber-800 border border-amber-200' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'}`}>
-      {count || <CheckCircle2 size={14}/>}
+  return <div className="flex items-center gap-3 px-5 py-3 hover:bg-slate-50/70 transition-colors">
+    <span className="flex h-6 min-w-6 shrink-0 items-center justify-center rounded-md border border-amber-200 bg-amber-50 px-1.5 text-xs font-bold text-amber-800 tabular-nums">
+      {count}
     </span>
-    <p className="min-w-0 flex-1 text-xs font-medium text-slate-700">{label}</p>
+    <p className="min-w-0 flex-1 text-xs font-semibold text-slate-800">{label}</p>
     <Link to={to} className="shrink-0 text-xs font-semibold text-brand-700 hover:underline">{action}<span aria-hidden="true"> →</span></Link>
   </div>;
 }
